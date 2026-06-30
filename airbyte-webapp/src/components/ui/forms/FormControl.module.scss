@@ -1,0 +1,77 @@
+@use "scss/colors";
+@use "scss/variables";
+
+$spaceBelow: 30px;
+
+.control {
+  position: relative;
+
+  &__label {
+    display: block;
+    margin: 0;
+    padding-bottom: variables.$spacing-sm;
+  }
+
+  &__labelText {
+    display: flex;
+    align-items: center;
+  }
+
+  &__description {
+    font-size: variables.$font-size-sm;
+    color: colors.$grey-300;
+    margin: 0;
+  }
+
+  &__footerText {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    transition:
+      transform variables.$transition ease-in,
+      opacity variables.$transition ease-in-out;
+  }
+
+  &__footer {
+    position: absolute;
+    width: 100%;
+    height: $spaceBelow;
+    padding-top: variables.$spacing-sm;
+    bottom: 0;
+    left: 0;
+
+    &--doesShiftLayout {
+      position: relative;
+      height: auto;
+    }
+  }
+
+  &--reserveSpaceForError {
+    padding-bottom: $spaceBelow;
+  }
+
+  &--inline {
+    display: flex;
+    gap: variables.$spacing-md;
+
+    .control__label {
+      flex: 2 0 0;
+    }
+
+    .control__field {
+      flex: 1 0 0;
+      display: flex;
+      justify-content: flex-end;
+    }
+
+    .control__errorMessage {
+      text-align: right;
+    }
+  }
+
+  &__optional {
+    color: colors.$grey-300;
+    font-style: oblique;
+    padding-left: variables.$spacing-sm;
+  }
+}

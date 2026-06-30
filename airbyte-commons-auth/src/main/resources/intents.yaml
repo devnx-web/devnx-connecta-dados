@@ -1,0 +1,197 @@
+intents:
+  ViewConnection:
+    name: View connection
+    description: View a connection between a source and a destination
+    roles:
+      - ORGANIZATION_READER
+      - ORGANIZATION_RUNNER
+      - ORGANIZATION_EDITOR
+      - ORGANIZATION_ADMIN
+      - WORKSPACE_READER
+      - WORKSPACE_RUNNER
+      - WORKSPACE_EDITOR
+      - WORKSPACE_ADMIN
+      - ADMIN
+  CreateOrEditConnection:
+    name: Create or edit connection
+    description: Create a connection between a source and a destination
+    roles:
+      - ORGANIZATION_EDITOR
+      - ORGANIZATION_ADMIN
+      - WORKSPACE_EDITOR
+      - WORKSPACE_ADMIN
+      - ADMIN
+  CreateOrEditConnector:
+    name: Create or edit connector
+    description: Create a source or destination connector, or change the settings of an existing connector
+    roles:
+      - ORGANIZATION_EDITOR
+      - ORGANIZATION_ADMIN
+      - WORKSPACE_EDITOR
+      - WORKSPACE_ADMIN
+      - ADMIN
+  UploadCustomConnector:
+    name: Create custom docker connector
+    description: Upload a custom docker connector to be used in the workspace
+    roles:
+      - ORGANIZATION_EDITOR
+      - ORGANIZATION_ADMIN
+      - WORKSPACE_EDITOR
+      - WORKSPACE_ADMIN
+      - ADMIN
+  UpdateOrDeleteCustomConnector:
+    name: Update or delete custom docker connector
+    description: Update or delete a custom docker connector in the workspace
+    roles:
+      - ORGANIZATION_ADMIN
+      - ADMIN
+  ViewOrganizationSettings:
+    name: View organization settings
+    description: Ability to see the settings of an organization
+    roles:
+      - ORGANIZATION_READER
+      - ORGANIZATION_RUNNER
+      - ORGANIZATION_EDITOR
+      - ORGANIZATION_ADMIN
+      - ADMIN
+  ViewOrganizationTrialStatus:
+    name: View organization trial status
+    description: Ability to see the trial status of an organization
+    roles:
+      - ORGANIZATION_READER
+      - ORGANIZATION_RUNNER
+      - ORGANIZATION_EDITOR
+      - ORGANIZATION_ADMIN
+      - ADMIN
+  ViewOrganizationUsage:
+    name: View organization usage
+    description: Ability to view usage across the whole organization
+    roles:
+      - ORGANIZATION_ADMIN
+      - ADMIN
+  ManageOrganizationBilling:
+    name: Manage organization billing
+    description: View and edit billing information for the organization
+    roles:
+      - ORGANIZATION_ADMIN
+      - ADMIN
+  ViewOrganizationDetails:
+    name: View organization details
+    description: View detailed information about the organization
+    roles:
+      - ORGANIZATION_MEMBER
+      - ORGANIZATION_READER
+      - ORGANIZATION_RUNNER
+      - ORGANIZATION_EDITOR
+      - ORGANIZATION_ADMIN
+      - ADMIN
+  ManageOrganizationPaymentConfigs:
+    name: Manage organization payment configs
+    description: Ability to directly interact with organization payment configs
+    # This intent can only be used for instance admin at the moment, since the API it's used on are not all using
+    # POST request bodies, thus our authentication logic might not find the organizationId in the request.
+    roles:
+      - ADMIN
+  ManageDomainVerification:
+    name: Manage domain verification
+    description: Manage domain verification request for an organization
+    roles:
+      - ORGANIZATION_ADMIN
+      - ADMIN
+
+  RunAndCancelConnectionSyncAndRefresh:
+    name: Run and cancel connection sync and refresh
+    description: Allow user to run/cancel syncs and refreshes
+    roles:
+      - ORGANIZATION_RUNNER
+      - ORGANIZATION_EDITOR
+      - ORGANIZATION_ADMIN
+      - WORKSPACE_RUNNER
+      - WORKSPACE_EDITOR
+      - WORKSPACE_ADMIN
+      - ADMIN
+
+  ManageSecretStorages:
+    name: Manage secret storages
+    description: Ability to manage secret storages
+    roles:
+      - ADMIN
+
+  RunOAuthFlow:
+    name: Run the OAuth flow
+    description: Allow user to run OAuth flow
+    roles:
+      - EMBEDDED_END_USER
+      - WORKSPACE_EDITOR
+      - WORKSPACE_ADMIN
+      - ORGANIZATION_EDITOR
+      - ORGANIZATION_ADMIN
+      - ADMIN
+  UpdateWorkspace:
+    name: Update workspace
+    description: Update a workspace's settings
+    roles:
+      - ORGANIZATION_ADMIN
+      - ORGANIZATION_EDITOR
+      - WORKSPACE_ADMIN
+      - ADMIN
+  DeleteWorkspace:
+    name: Delete workspace
+    description: Delete a workspace
+    roles:
+      - ORGANIZATION_ADMIN
+      - WORKSPACE_ADMIN
+      - ADMIN
+  UpdateWorkspacePermissions:
+    name: Update workspace-level permissions
+    description: Update a user's workspace-level permissions
+    roles:
+      - ORGANIZATION_ADMIN
+      - WORKSPACE_ADMIN
+      - ADMIN
+  UpdateOrganizationPermissions:
+    name: Update organization-level permissions
+    description: Update a user's organization-level permissions
+    roles:
+      - ORGANIZATION_ADMIN
+      - ADMIN
+  ViewWorkspaceSettings:
+    name: View workspace settings
+    description: View settings for a workspace
+    roles:
+      - ORGANIZATION_ADMIN
+      - ORGANIZATION_EDITOR
+      - ORGANIZATION_RUNNER
+      - ORGANIZATION_READER
+      - WORKSPACE_ADMIN
+      - WORKSPACE_EDITOR
+      - WORKSPACE_RUNNER
+      - WORKSPACE_READER
+  CreateOrEditConnectorBuilder:
+    name: Create or edit connector builder connectors
+    description: Create a connector builder connector or change the settings of an existing connector builder connector
+    roles:
+      - ORGANIZATION_EDITOR
+      - ORGANIZATION_ADMIN
+      - WORKSPACE_EDITOR
+      - WORKSPACE_ADMIN
+      - ADMIN
+  ManageDataplanes:
+    name: Manage dataplanes
+    description: Create, edit, list, and delete dataplanes
+    roles:
+      - ORGANIZATION_ADMIN
+      - ADMIN
+  ManageDataplaneGroups:
+    name: Manage dataplane groups
+    description: Create, edit, list, and delete dataplane groups
+    roles:
+      - ORGANIZATION_ADMIN
+      - ADMIN
+  ManageConnectionOnDemandCapacity:
+    name: Manage connection on-demand capacity
+    description: Enable or disable on-demand capacity for a connection
+    roles:
+      - ORGANIZATION_ADMIN
+      - WORKSPACE_ADMIN
+      - ADMIN

@@ -1,0 +1,81 @@
+@use "scss/colors";
+@use "scss/variables";
+
+$iconWidth: 38px;
+
+.button {
+  border: 1px solid transparent;
+  display: flex;
+  gap: variables.$spacing-lg;
+  align-items: center;
+  justify-content: space-between;
+  padding: variables.$spacing-lg;
+  box-shadow: variables.$box-shadow;
+  background-color: colors.$foreground;
+  border-radius: variables.$border-radius-md;
+  cursor: pointer;
+  transition: box-shadow variables.$transition ease;
+  text-align: left;
+  color: colors.$dark-blue;
+
+  &:hover {
+    box-shadow: variables.$box-shadow-raised;
+    border-color: colors.$blue-100;
+  }
+}
+
+.iconAndName {
+  min-width: $iconWidth;
+}
+
+.text {
+  min-width: 0;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  text-overflow: ellipsis;
+  overflow: hidden;
+
+  &.twoMaxLines {
+    // supported on all modern browsers, official support is being worked on
+    -webkit-line-clamp: 2;
+    line-clamp: 2;
+  }
+
+  &.threeMaxLines {
+    -webkit-line-clamp: 3;
+    line-clamp: 3;
+  }
+}
+
+.metrics {
+  padding-right: variables.$spacing-xl;
+  gap: calc(2 * variables.$spacing-lg);
+}
+
+.icon {
+  width: $iconWidth;
+  height: $iconWidth;
+}
+
+.builderPrompt {
+  min-width: 0;
+}
+
+.builderPromptIcon {
+  flex-shrink: 0;
+}
+
+.builderPromptText {
+  max-width: 100%;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+
+  &.builderPromptPrimary {
+    flex-shrink: 0;
+  }
+
+  &.builderPromptSecondary {
+    flex-shrink: 1;
+  }
+}

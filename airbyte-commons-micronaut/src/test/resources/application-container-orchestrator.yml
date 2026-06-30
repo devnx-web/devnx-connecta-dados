@@ -1,0 +1,5 @@
+airbyte:
+  container.orchestrator:
+    enable-unsafe-code: true
+    java-opts: test-java-opts
+    platform-mode: test-platform-mode

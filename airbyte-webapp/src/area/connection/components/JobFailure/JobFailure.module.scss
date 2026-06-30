@@ -1,0 +1,44 @@
+@use "scss/variables";
+
+$toggle-icon-width: 17px;
+
+.label {
+  flex-grow: 1;
+  text-align: left;
+  background: none;
+  border: none;
+  padding: variables.$spacing-md;
+  cursor: pointer;
+  color: inherit;
+}
+
+.toggleIcon {
+  width: $toggle-icon-width;
+  display: flex;
+}
+
+.details {
+  padding-left: calc($toggle-icon-width + variables.$spacing-md);
+  overflow: auto;
+}
+
+.iconContainer {
+  padding-right: variables.$spacing-lg;
+}
+
+.stacktraceContainer {
+  max-height: 300px;
+  border-radius: variables.$border-radius-sm;
+  margin-top: variables.$spacing-md;
+  overflow: hidden;
+}
+
+.logsModal {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+}
+
+.viewLogsButton {
+  padding: variables.$spacing-sm variables.$spacing-md;
+}

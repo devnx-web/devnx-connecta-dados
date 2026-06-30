@@ -1,0 +1,52 @@
+@use "scss/colors";
+@use "scss/fonts";
+@use "scss/variables";
+
+.circle {
+  height: 20px;
+  width: fit-content;
+  min-width: 20px;
+  border-radius: variables.$border-radius-lg;
+  padding: 0 4px;
+  overflow: hidden;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+
+  &.small {
+    height: 14px;
+    min-width: 14px;
+    border-radius: variables.$border-radius-pill;
+    padding: 0;
+  }
+
+  &.default {
+    background: colors.$dark-blue-100;
+  }
+
+  &.green {
+    background: colors.$green;
+  }
+
+  &.red {
+    background: colors.$red;
+  }
+
+  &.blue {
+    background: colors.$blue;
+  }
+
+  &.yellow {
+    background: colors.$yellow;
+  }
+
+  &.blue--outline {
+    border: variables.$border-thin solid colors.$blue;
+    background: colors.$foreground;
+  }
+
+  &.grey--outline {
+    border: variables.$border-thin solid colors.$grey-300;
+    background: colors.$foreground;
+  }
+}

@@ -1,0 +1,14 @@
+@use "scss/variables";
+
+.cronZoneOption {
+  overflow: visible;
+}
+
+.cronZonesListBoxBtn {
+  min-width: calc(variables.$height-long-listbox-options-list / 2);
+}
+
+.errorMessageContainer {
+  position: relative;
+  padding-bottom: 30px;
+}

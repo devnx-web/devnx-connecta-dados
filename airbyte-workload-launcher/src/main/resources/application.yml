@@ -1,0 +1,346 @@
+micronaut:
+  application:
+    name: airbyte-workload-launcher
+  env:
+    additional-envs: ${MICRONAUT_ENVIRONMENTS:}
+  server:
+    port: 8016
+    netty:
+      access-logger:
+        enabled: ${HTTP_ACCESS_LOG_ENABLED:false}
+    idle-timeout: ${HTTP_IDLE_TIMEOUT:10m}
+  metrics:
+    enabled: ${MICROMETER_METRICS_ENABLED:false}
+    export:
+      otlp:
+        enabled: ${MICROMETER_METRICS_OTLP_ENABLED:false}
+        step: ${MICROMETER_METRICS_STEP:PT30S}
+        url: ${OTEL_COLLECTOR_ENDPOINT:`http://localhost:4318/v1/metrics`}
+      statsd:
+        enabled: ${MICROMETER_METRICS_STATSD_ENABLED:false}
+        flavor: ${MICROMETER_METRICS_STATSD_FLAVOR:datadog}
+        step: ${MICROMETER_METRICS_STEP:PT30S}
+        host: ${STATSD_HOST:localhost}
+        port: ${STATSD_PORT:8125}
+  caches:
+    network-policy-label-cache:
+      expire-after-write: 10m
+      maximum-size: 100_000
+  executors:
+    kube-client:
+      type: cached
+      n-threads: ${KUBERNETES_CLIENT_MAX_IDLE_CONNECTIONS:10}
+      core-pool-size: 0
+airbyte:
+  airbyte-url: ${AIRBYTE_URL:}
+  license-key: ${AIRBYTE_LICENSE_KEY:empty}
+  pod-sweeper:
+    # Time-to-live (in minutes) for running pods. Empty string (mapped to null) by default,
+    # meaning running pods are preserved indefinitely.
+    runningTtl: ${RUNNING_TTL_MINUTES:-1}
+    succeededTtl: ${SUCCEEDED_TTL_MINUTES:10}
+    unsuccessfulTtl: ${UNSUCCESSFUL_TTL_MINUTES:120}
+    rate: PT2M
+  connector:
+    source:
+      credentials:
+        aws:
+          assumed-role:
+            # These properties represent the AWS assume role credentials used to connect to an AWS source
+            #  using Airbyte's IAM role
+            access-key: AWS_ACCESS_KEY_ID
+            secret-key: AWS_SECRET_ACCESS_KEY
+            secret-name: ${AWS_ASSUME_ROLE_SECRET_NAME:}
+  container:
+    rootless-workload: ${ROOTLESS_WORKLOAD:false}
+  control-plane:
+    auth-endpoint: ${CONTROL_PLANE_AUTH_ENDPOINT:}
+  datadog:
+    agent:
+      host: ${DD_AGENT_HOST:}
+      port: ${DD_DOGSTATSD_PORT:}
+    orchestrator-disabled-integrations: ${DD_ORCHESTRATOR_DISABLED_INTEGRATIONS:GRPC,GRPC_CLIENT,GRPC_SERVER,NETTY,NETTY_4_1,GOOGLE_HTTP_CLIENT,HTTPURLCONNECTION,URLCONNECTION}
+    env: ${DD_ENV:}
+    version: ${DD_VERSION:}
+  data-plane:
+    credentials:
+      client-id-secret-key: ${DATAPLANE_CLIENT_ID_SECRET_KEY}
+      client-id-secret-name: ${DATAPLANE_CLIENT_ID_SECRET_NAME}
+      client-secret-secret-key: ${DATAPLANE_CLIENT_SECRET_SECRET_KEY}
+      client-secret-secret-name: ${DATAPLANE_CLIENT_SECRET_SECRET_NAME}
+  edition: ${AIRBYTE_EDITION:COMMUNITY}
+  feature-flag:
+    client: ${FEATURE_FLAG_CLIENT:CONFIGFILE}
+    path: ${FEATURE_FLAG_PATH:/flags}
+    api-key: ${LAUNCHDARKLY_KEY:}
+    base-url: ${FEATURE_FLAG_BASEURL:}
+  internal-api:
+    base-path: ${INTERNAL_API_HOST}/api
+    connect-timeout-seconds: ${AIRBYTE_API_CONNECT_TIMEOUT_SECONDS:30}
+    read-timeout-seconds: ${AIRBYTE_API_READ_TIMEOUT_SECONDS:600}
+    retries:
+      delay-seconds: ${AIRBYTE_API_RETRY_DELAY_SECONDS:2}
+      max: ${AIRBYTE_API_MAX_RETRIES:5}
+    auth:
+      type: DATAPLANE_ACCESS_TOKEN
+      token-endpoint: ${CONTROL_PLANE_TOKEN_ENDPOINT}
+      client-id: ${DATAPLANE_CLIENT_ID}
+      client-secret: ${DATAPLANE_CLIENT_SECRET}
+  kubernetes:
+    client:
+      call-timeout-sec: ${KUBERNETES_CLIENT_CALL_TIMEOUT_SECONDS:30}
+      connect-timeout-sec: ${KUBERNETES_CLIENT_CONNECT_TIMEOUT_SECONDS:30}
+      read-timeout-sec: ${KUBERNETES_CLIENT_READ_TIMEOUT_SECONDS:30}
+      write-timeout-sec: ${KUBERNETES_CLIENT_WRITE_TIMEOUT_SECONDS:30}
+      connection-pool:
+        keep-alive-sec: ${KUBERNETES_CLIENT_CONNECTION_KEEP_ALIVE_SECONDS:600}
+        max-idle-connections: ${KUBERNETES_CLIENT_MAX_IDLE_CONNECTIONS:25}
+      retries:
+        delay-seconds: ${KUBERNETES_CLIENT_RETRY_DELAY_SECONDS:2}
+        max: ${KUBERNETES_CLIENT_MAX_RETRIES:5}
+    resource-check-rate: ${WORKLOAD_LAUNCHER_POD_PENDING_RESOURCE_CHECK_RATE:PT30S}
+  logging:
+    log-level: ${LOG_LEVEL:}
+    platform-log-format: ${PLATFORM_LOG_FORMAT:}
+    s3-path-style-access: ${S3_PATH_STYLE_ACCESS:}
+  workload-api:
+    base-path: ${WORKLOAD_API_HOST:}
+    connect-timeout-seconds: ${WORKLOAD_API_CONNECT_TIMEOUT_SECONDS:30}
+    read-timeout-seconds: ${WORKLOAD_API_READ_TIMEOUT_SECONDS:300}
+    retries:
+      delay-seconds: ${WORKLOAD_API_RETRY_DELAY_SECONDS:2}
+      max: ${WORKLOAD_API_MAX_RETRIES:5}
+  workload-launcher:
+    heartbeat-rate: PT30S
+    workload-start-timeout: ${WORKLOAD_LAUNCHER_WORKLOAD_START_TIMEOUT:PT5H}
+    parallelism:
+      default-queue: ${WORKLOAD_LAUNCHER_PARALLELISM:10}
+      high-priority-queue: ${WORKLOAD_LAUNCHER_PARALLELISM:10}
+      max-surge: ${WORKLOAD_PARALLELISM_MAX_SURGE:10}
+    network-policy-introspection: false
+    consumer:
+      queue-task-cap: ${WORKLOAD_CONSUMER_QUEUE_TASK_CAP:5}
+      default-queue:
+        poll-interval-seconds: ${WORKLOAD_DEFAULT_PRIO_POLL_FREQUENCY:1}
+        poll-size-items: ${WORKLOAD_DEFAULT_PRIO_POLL_SIZE:10}
+      high-priority-queue:
+        poll-interval-seconds: ${WORKLOAD_HIGH_PRIO_POLL_FREQUENCY:1}
+        poll-size-items: ${WORKLOAD_HIGH_PRIO_POLL_SIZE:10}
+  secret:
+    persistence: ${SECRET_PERSISTENCE:TESTING_CONFIG_DB_TABLE}
+    store:
+      aws:
+        region: ${AWS_SECRET_MANAGER_REGION:}
+        kms-key-arn: ${AWS_KMS_KEY_ARN:}
+        tags: ${AWS_SECRET_MANAGER_SECRET_TAGS:}
+        # injects actual secret values
+        access-key: ${AWS_SECRET_MANAGER_ACCESS_KEY_ID:}
+        secret-key: ${AWS_SECRET_MANAGER_SECRET_ACCESS_KEY:}
+        # injects the names/keys for secret reference
+        access-key-ref-name: ${AWS_SECRET_MANAGER_ACCESS_KEY_ID_REF_NAME:}
+        access-key-ref-key: ${AWS_SECRET_MANAGER_ACCESS_KEY_ID_REF_KEY:}
+        secret-key-ref-name: ${AWS_SECRET_MANAGER_SECRET_ACCESS_KEY_REF_NAME:}
+        secret-key-ref-key: ${AWS_SECRET_MANAGER_SECRET_ACCESS_KEY_REF_KEY:}
+      gcp:
+        # injects the actual secret value
+        credentials: ${SECRET_STORE_GCP_CREDENTIALS:}
+        project-id: ${SECRET_STORE_GCP_PROJECT_ID:}
+        region: ${SECRET_STORE_GCP_REGION:}
+        # injects the name/key for secret reference
+        credentials-ref-name: ${SECRET_STORE_GCP_SECRET_NAME:}
+        credentials-ref-key: ${SECRET_STORE_GCP_SECRET_KEY:}
+      vault:
+        address: ${VAULT_ADDRESS:}
+        prefix: ${VAULT_PREFIX:}
+        # injects the actual secret value
+        token: ${VAULT_AUTH_TOKEN:}
+        # injects the name/key for secret reference
+        token-ref-name: ${VAULT_AUTH_TOKEN_REF_NAME:}
+        token-ref-key: ${VAULT_AUTH_TOKEN_REF_KEY:}
+      azure:
+        vault-url: ${AB_AZURE_KEY_VAULT_VAULT_URL:}
+        tenant-id: ${AB_AZURE_KEY_VAULT_TENANT_ID:}
+        tags: ${AB_AZURE_KEY_VAULT_TAGS:}
+        # injects actual secret values
+        client-id: ${AB_AZURE_KEY_VAULT_CLIENT_ID:}
+        client-secret: ${AB_AZURE_KEY_VAULT_CLIENT_SECRET:}
+        # injects the name/key for secret reference
+        client-id-ref-name: ${AB_AZURE_KEY_VAULT_CLIENT_ID_REF_NAME:}
+        client-id-ref-key: ${AB_AZURE_KEY_VAULT_CLIENT_ID_REF_REF_KEY:}
+        client-secret-ref-name: ${AB_AZURE_KEY_VAULT_CLIENT_SECRET_REF_REF_NAME:}
+        client-secret-ref-key: ${AB_AZURE_KEY_VAULT_CLIENT_SECRET_REF_REF_KEY:}
+  tracking:
+    strategy: ${TRACKING_STRATEGY:LOGGING}
+    write-key: ${SEGMENT_WRITE_KEY:}
+  version: ${AIRBYTE_VERSION}
+  container.orchestrator:
+    enable-unsafe-code: ${AIRBYTE_ENABLE_UNSAFE_CODE:false}
+    java-opts: ${CONTAINER_ORCHESTRATOR_JAVA_OPTS:}
+  worker:
+    job:
+      error-reporting:
+        sentry:
+          dsn: ${JOB_ERROR_REPORTING_SENTRY_DSN:}
+        strategy: ${JOB_ERROR_REPORTING_STRATEGY:LOGGING}
+      kube:
+        connector-image-registry: ${JOB_KUBE_CONNECTOR_IMAGE_REGISTRY:}
+        init:
+          container:
+            image: ${WORKLOAD_INIT_IMAGE:}
+            image-pull-policy: ${JOB_KUBE_INIT_CONTAINER_IMAGE_PULL_POLICY:IfNotPresent}
+        main:
+          container:
+            image: ${CONTAINER_ORCHESTRATOR_IMAGE:}
+            image-pull-policy: ${JOB_KUBE_MAIN_CONTAINER_IMAGE_PULL_POLICY:IfNotPresent}
+            image-pull-secret: ${JOB_KUBE_MAIN_CONTAINER_IMAGE_PULL_SECRET:}
+        namespace: ${JOB_KUBE_NAMESPACE:default}
+        serviceAccount: ${JOB_KUBE_SERVICEACCOUNT:airbyte-admin} # by default, Airbyte on Kube ships with the `airbyte-admin` service account. If that ever changes, this default should change with it
+        tolerations: ${JOB_KUBE_TOLERATIONS:}
+        sidecar:
+          container:
+            image: ${CONNECTOR_SIDECAR_IMAGE:}
+            image-pull-policy: ${JOB_KUBE_SIDECAR_CONTAINER_IMAGE_PULL_POLICY:IfNotPresent}
+        profiler:
+          container:
+            image: ${CONNECTOR_PROFILER_IMAGE:}
+            image-pull-policy: ${JOB_KUBE_PROFILER_CONTAINER_IMAGE_PULL_POLICY:IfNotPresent}
+            cpu-limit: ${PROFILER_JOB_MAIN_CONTAINER_CPU_LIMIT:1}
+            cpu-request: ${PROFILER_JOB_MAIN_CONTAINER_CPU_REQUEST:1}
+            memory-limit: ${PROFILER_JOB_MAIN_CONTAINER_MEMORY_LIMIT:1024Mi}
+            memory-request: ${PROFILER_JOB_MAIN_CONTAINER_MEMORY_REQUEST:1024Mi}
+        volumes:
+          data-plane-creds:
+            mount-path: ${CONTAINER_ORCHESTRATOR_DATA_PLANE_CREDS_SECRET_MOUNT_PATH:}
+            secret-name: ${CONTAINER_ORCHESTRATOR_DATA_PLANE_CREDS_SECRET_NAME:}
+          gcs-creds:
+            mount-path: ${CONTAINER_ORCHESTRATOR_SECRET_MOUNT_PATH:}
+            secret-name: ${GCS_CREDENTIALS_SECRET_NAME:}
+          secret:
+            mount-path: ${CONTAINER_ORCHESTRATOR_SECRET_MOUNT_PATH:}
+            secret-name: ${CONTAINER_ORCHESTRATOR_SECRET_NAME:}
+          staging:
+            mount-path: ${AIRBYTE_STAGING_PATH:/staging/files}
+          local:
+            enabled: ${JOB_KUBE_LOCAL_VOLUME_ENABLED:false}
+    kube-job-configs:
+      default:
+        annotations: ${JOB_KUBE_ANNOTATIONS:}
+        labels: ${JOB_KUBE_LABELS:}
+        node-selectors: ${JOB_KUBE_NODE_SELECTORS:}
+        cpu-limit: ${JOB_MAIN_CONTAINER_CPU_LIMIT:}
+        cpu-request: ${JOB_MAIN_CONTAINER_CPU_REQUEST:}
+        memory-limit: ${JOB_MAIN_CONTAINER_MEMORY_LIMIT:}
+        memory-request: ${JOB_MAIN_CONTAINER_MEMORY_REQUEST:}
+      check:
+        annotations: ${CHECK_JOB_KUBE_ANNOTATIONS:}
+        labels: ${CHECK_JOB_KUBE_LABELS:}
+        node-selectors: ${CHECK_JOB_KUBE_NODE_SELECTORS:}
+        cpu-limit: ${CHECK_JOB_MAIN_CONTAINER_CPU_LIMIT:}
+        cpu-request: ${CHECK_JOB_MAIN_CONTAINER_CPU_REQUEST:}
+        memory-limit: ${CHECK_JOB_MAIN_CONTAINER_MEMORY_LIMIT:}
+        memory-request: ${CHECK_JOB_MAIN_CONTAINER_MEMORY_REQUEST:}
+      discover:
+        annotations: ${DISCOVER_JOB_KUBE_ANNOTATIONS:}
+        labels: ${DISCOVER_JOB_KUBE_LABELS:}
+        node-selectors: ${DISCOVER_JOB_KUBE_NODE_SELECTORS:}
+        cpu-limit: ${DISCOVER_JOB_MAIN_CONTAINER_CPU_LIMIT:}
+        cpu-request: ${DISCOVER_JOB_MAIN_CONTAINER_CPU_REQUEST:}
+        memory-limit: ${DISCOVER_JOB_MAIN_CONTAINER_MEMORY_LIMIT:}
+        memory-request: ${DISCOVER_JOB_MAIN_CONTAINER_MEMORY_REQUEST:}
+      spec:
+        annotations: ${SPEC_JOB_KUBE_ANNOTATIONS:}
+        labels: ${SPEC_JOB_KUBE_LABELS:}
+        node-selectors: ${SPEC_JOB_KUBE_NODE_SELECTORS:}
+        cpu-limit: ${SPEC_JOB_MAIN_CONTAINER_CPU_LIMIT:}
+        cpu-request: ${SPEC_JOB_MAIN_CONTAINER_CPU_REQUEST:}
+        memory-limit: ${SPEC_JOB_MAIN_CONTAINER_MEMORY_LIMIT:}
+        memory-request: ${SPEC_JOB_MAIN_CONTAINER_MEMORY_REQUEST:}
+    connector-sidecar:
+      resources:
+        cpu-limit: ${SIDECAR_MAIN_CONTAINER_CPU_LIMIT:}
+        cpu-request: ${SIDECAR_MAIN_CONTAINER_CPU_REQUEST:}
+        memory-limit: ${SIDECAR_MAIN_CONTAINER_MEMORY_LIMIT:}
+        memory-request: ${SIDECAR_MAIN_CONTAINER_MEMORY_REQUEST:}
+    file-transfer:
+      resources:
+        ephemeral-storage-limit: ${FILE_TRANSFER_EPHEMERAL_STORAGE_LIMIT:5G}
+        ephemeral-storage-request: ${FILE_TRANSFER_EPHEMERAL_STORAGE_REQUEST:5G}
+    isolated:
+      kube:
+        use-custom-node-selector: ${USE_CUSTOM_NODE_SELECTOR:false}
+        node-selectors: ${JOB_ISOLATED_KUBE_NODE_SELECTORS:}
+  data.plane:
+    service-account:
+      credentials-path: ${DATA_PLANE_SERVICE_ACCOUNT_CREDENTIALS_PATH:}
+      email: ${DATA_PLANE_SERVICE_ACCOUNT_EMAIL:}
+  control.plane:
+    auth-endpoint: ${CONTROL_PLANE_AUTH_ENDPOINT:}
+  acceptance-test-enabled: ${ACCEPTANCE_TEST_ENABLED:false}
+  cloud:
+    storage:
+      type: ${STORAGE_TYPE}
+      bucket:
+        log: ${STORAGE_BUCKET_LOG}
+        state: ${STORAGE_BUCKET_STATE}
+        workload-output: ${STORAGE_BUCKET_WORKLOAD_OUTPUT}
+        activity-payload: ${STORAGE_BUCKET_ACTIVITY_PAYLOAD}
+        audit-logging: ${STORAGE_BUCKET_AUDIT_LOGGING}
+      azure:
+        connection-string: ${AZURE_STORAGE_CONNECTION_STRING:}
+      gcs:
+        application-credentials: ${GOOGLE_APPLICATION_CREDENTIALS:}
+      minio:
+        access-key: ${AWS_ACCESS_KEY_ID:}
+        endpoint: ${MINIO_ENDPOINT:}
+        secret-access-key: ${AWS_SECRET_ACCESS_KEY:}
+      s3:
+        access-key: ${AWS_ACCESS_KEY_ID:}
+        region: ${AWS_DEFAULT_REGION:}
+        secret-access-key: ${AWS_SECRET_ACCESS_KEY:}
+  workspace-root: ${WORKSPACE_ROOT}
+
+google.application.credentials: ${GOOGLE_APPLICATION_CREDENTIALS:}
+
+endpoints:
+  all:
+    port: 8085
+  beans:
+    enabled: true
+    sensitive: false
+  env:
+    enabled: true
+    sensitive: false
+  health:
+    enabled: true
+    jdbc:
+      enabled: false
+    sensitive: false
+  info:
+    enabled: true
+    sensitive: true
+  loggers:
+    enabled: true
+    sensitive: false
+  metrics:
+    enabled: ${MICROMETER_METRICS_ENABLED:false}
+    sensitive: false
+  refresh:
+    enabled: false
+    sensitive: true
+  routes:
+    enabled: true
+    sensitive: false
+  threaddump:
+    enabled: true
+    sensitive: false
+
+logger:
+  levels:
+    com.zaxxer.hikari: ERROR
+    com.zaxxer.hikari.pool: ERROR
+    io.grpc: INFO
+    io.fabric8.kubernetes.client: INFO
+    io.netty: INFO
+#   Uncomment to help resolve issues with conditional beans
+#      io.micronaut.context.condition: DEBUG
+

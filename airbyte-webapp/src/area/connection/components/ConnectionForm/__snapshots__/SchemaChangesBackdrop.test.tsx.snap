@@ -1,0 +1,38 @@
+// Jest Snapshot v1, https://goo.gl/fbAQLP
+
+exports[`SchemaChangesBackdrop renders with breaking changes and prevents background interaction 1`] = `
+<div
+  class="schemaBreakingChanges"
+  data-testid="schemaChangesBackdrop"
+>
+  <div
+    class="directionRow gapMd alignItemsCenter justifyContentCenter wrapNowrap container schemaBreakingChanges__backdrop"
+  >
+    <div
+      class="directionColumn gapLg alignItemsCenter justifyContentCenter wrapNowrap container schemaBreakingChanges__message"
+    >
+      <p
+        class="text lg darkBlue center"
+        data-type="text"
+      >
+        Please review the schema updates before making changes to the connection
+      </p>
+      <button
+        class="button button--size-xs button--primary-dark"
+        type="button"
+      >
+        <span
+          class="button__children"
+        >
+          Review changes
+        </span>
+      </button>
+    </div>
+  </div>
+  <button
+    data-testid="bg-button"
+  >
+    don't click
+  </button>
+</div>
+`;

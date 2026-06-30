@@ -1,0 +1,89 @@
+import { FormattedMessage } from "react-intl";
+
+import { Box } from "components/ui/Box";
+import { BrandingBadge } from "components/ui/BrandingBadge";
+import { Text } from "components/ui/Text";
+
+import { useOrganizationPlan } from "area/organization/utils";
+import { FeatureItem, useFeature } from "core/services/features";
+
+import { CancelInvitationMenuItem } from "./CancelInvitationMenuItem";
+import { ChangeRoleMenuItem } from "./ChangeRoleMenuItem";
+import { RemoveRoleMenuItem } from "./RemoveRoleMenuItem";
+import styles from "./RoleManagementMenuBody.module.scss";
+import {
+  ResourceType,
+  UnifiedUserModel,
+  isTeamsFeaturePermissionType,
+  permissionStringDictionary,
+  permissionsByResourceType,
+} from "./util";
+interface RoleManagementMenuBodyProps {
+  user: UnifiedUserModel;
+  resourceType: ResourceType;
+  close: () => void;
+}
+export const RoleManagementMenuBody: React.FC<RoleManagementMenuBodyProps> = ({ user, resourceType, close }) => {
+  const { isUnifiedTrialPlan } = useOrganizationPlan();
+  const areAllRbacRolesEnabled = useFeature(FeatureItem.AllowAllRBACRoles);
+  const rolesToAllow = !user.invitationStatus && areAllRbacRolesEnabled ? permissionsByResourceType[resourceType] : [];
+
+  const showOrgRoleInWorkspaceMenu =
+    resourceType === "workspace" &&
+    user?.organizationPermission?.permissionType &&
+    user?.organizationPermission?.permissionType !== "organization_member";
+
+  // user is invited but not yet accepted
+  const showCancelInvite = !!user.invitationStatus;
+  // user is not invited (so has a relevant permission) and we're in a workspace OR organization
+  const showRemoveUser = !user.invitationStatus;
+
+  return (
+    <ul className={styles.roleManagementMenu__rolesList}>
+      {showOrgRoleInWorkspaceMenu && user?.organizationPermission?.permissionType && (
+        <li className={styles.roleManagementMenu__listItem}>
+          <Box pt="xl" pb="xl" px="lg" className={styles.roleManagementMenu__menuTitle}>
+            <Text color="grey" align="center" size="sm" italicized bold={!user.organizationPermission?.permissionType}>
+              <FormattedMessage
+                id="role.organization.userDescription"
+                values={{
+                  name: user.userName || user.userEmail,
+                  role: (
+                    <FormattedMessage
+                      id={permissionStringDictionary[user.organizationPermission.permissionType].role}
+                    />
+                  ),
+                }}
+              />
+            </Text>
+            {isTeamsFeaturePermissionType(user?.organizationPermission?.permissionType) && isUnifiedTrialPlan && (
+              <BrandingBadge product="cloudForTeams" />
+            )}
+          </Box>
+        </li>
+      )}
+      {rolesToAllow.map((permissionOption) => {
+        return (
+          <li key={permissionOption} className={styles.roleManagementMenu__listItem}>
+            <ChangeRoleMenuItem
+              permissionType={permissionOption}
+              resourceType={resourceType}
+              user={user}
+              onClose={close}
+            />
+          </li>
+        );
+      })}
+      {showCancelInvite && (
+        <li className={styles.roleManagementMenu__listItem}>
+          <CancelInvitationMenuItem user={user} />
+        </li>
+      )}
+      {showRemoveUser && (
+        <li className={styles.roleManagementMenu__listItem}>
+          <RemoveRoleMenuItem user={user} resourceType={resourceType} />
+        </li>
+      )}
+    </ul>
+  );
+};

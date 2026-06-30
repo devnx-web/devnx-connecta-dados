@@ -1,0 +1,41 @@
+import React from "react";
+import { Navigate, Route, Routes } from "react-router-dom";
+
+import { CloudSettingsRoutePaths } from "cloud/views/settings/routePaths";
+import { useAuthService } from "core/services/auth";
+import { SettingsRoutePaths } from "pages/routePaths";
+
+import { UserSettingsLayout } from "./components/UserSettingsLayout";
+
+const AccountSettingsView = React.lazy(() =>
+  import("cloud/views/users/AccountSettingsView/AccountSettingsView").then((module) => ({
+    default: module.AccountSettingsView,
+  }))
+);
+const ApplicationsView = React.lazy(() =>
+  import("cloud/views/users/ApplicationSettingsView/ApplicationSettingsView").then((module) => ({
+    default: module.ApplicationSettingsView,
+  }))
+);
+const AdvancedSettingsPage = React.lazy(() =>
+  import("pages/SettingsPage/pages/AdvancedSettingsPage/AdvancedSettingsPage").then((module) => ({
+    default: module.AdvancedSettingsPage,
+  }))
+);
+
+export const UserSettingsRoutes: React.FC = () => {
+  const { applicationSupport } = useAuthService();
+
+  return (
+    <Routes>
+      <Route element={<UserSettingsLayout />}>
+        <Route path={SettingsRoutePaths.Account} element={<AccountSettingsView />} />
+        {applicationSupport !== "none" && (
+          <Route path={CloudSettingsRoutePaths.Applications} element={<ApplicationsView />} />
+        )}
+        <Route path={CloudSettingsRoutePaths.Advanced} element={<AdvancedSettingsPage />} />
+        <Route path="*" element={<Navigate to={SettingsRoutePaths.Account} replace />} />
+      </Route>
+    </Routes>
+  );
+};

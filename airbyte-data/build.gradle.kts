@@ -1,0 +1,59 @@
+plugins {
+  id("io.airbyte.gradle.jvm.lib")
+  id("io.airbyte.gradle.publish")
+  `java-test-fixtures`
+}
+
+dependencies {
+  implementation(libs.bundles.micronaut.annotation)
+  implementation(libs.micronaut.cache.caffeine)
+  ksp(platform(libs.micronaut.platform))
+  ksp(libs.bundles.micronaut.annotation.processor)
+
+  kspTest(platform(libs.micronaut.platform))
+  kspTest(libs.bundles.micronaut.test.annotation.processor)
+
+  implementation(libs.bundles.jackson)
+  implementation(libs.bundles.micronaut.data.jdbc)
+  implementation("org.springframework.security:spring-security-crypto:6.3.8")
+  implementation(project(":oss:airbyte-api:server-api"))
+  implementation(project(":oss:airbyte-commons"))
+  implementation(project(":oss:airbyte-commons-auth"))
+  implementation(project(":oss:airbyte-commons-micronaut"))
+  implementation(project(":oss:airbyte-commons-protocol"))
+  implementation(project(":oss:airbyte-commons-license"))
+  implementation(project(":oss:airbyte-commons-storage"))
+  implementation(project(":oss:airbyte-config:config-models"))
+  implementation(project(":oss:airbyte-config:config-secrets"))
+  implementation(project(":oss:airbyte-db:db-lib"))
+  implementation(project(":oss:airbyte-db:jooq"))
+  implementation(project(":oss:airbyte-domain:models"))
+  implementation(project(":oss:airbyte-json-validation"))
+  implementation(project(":oss:airbyte-featureflag"))
+  implementation(project(":oss:airbyte-metrics:metrics-lib"))
+  implementation(libs.airbyte.protocol)
+  // For Keycloak Application Management
+  implementation(libs.bundles.keycloak.client)
+  implementation(libs.otel.annotations)
+  implementation(libs.micronaut.security.jwt)
+
+  testImplementation(libs.assertj.core)
+  testImplementation(libs.bundles.micronaut.test)
+  testImplementation(libs.postgresql)
+  testImplementation(libs.platform.testcontainers.postgresql)
+  testImplementation(libs.mockk)
+  testImplementation(project(":oss:airbyte-test-utils"))
+  testImplementation(libs.bundles.junit)
+  testImplementation(libs.bundles.kotest)
+
+  // TODO: flip this import - MockData should live in airbyte-data's testFixtures
+  // and be imported in this manner by config-persistence
+  // We can move the BaseConfigDatasets to airbyte-data's testFixtures as well.
+  testImplementation(testFixtures(project(":oss:airbyte-config:config-persistence")))
+}
+
+// The DuplicatesStrategy will be required while this module is mixture of kotlin and java dependencies.
+// Once the code has been migrated to kotlin, this can also be removed.
+tasks.withType<Jar>().configureEach {
+  duplicatesStrategy = DuplicatesStrategy.EXCLUDE
+}

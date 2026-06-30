@@ -1,0 +1,102 @@
+/*
+ * Copyright (c) 2020-2026 Airbyte, Inc., all rights reserved.
+ */
+
+package io.airbyte.workload.launcher.pods
+
+import io.airbyte.commons.constants.NetworkPolicyConstants
+import io.airbyte.micronaut.runtime.WORKLOAD_LAUNCHER_NETWORK_POLICY_INTROSPECTION
+import io.airbyte.workers.hashing.Hasher
+import io.fabric8.kubernetes.api.model.networking.v1.NetworkPolicy
+import io.fabric8.kubernetes.client.KubernetesClient
+import io.github.oshai.kotlinlogging.KotlinLogging
+import io.micronaut.cache.CacheManager
+import io.micronaut.context.annotation.Requires
+import jakarta.inject.Singleton
+import java.util.UUID
+
+private val logger = KotlinLogging.logger {}
+
+/**
+ * Class which lets us get the network security labels for pods.
+ * Tokens will be on the networkPolicies themselves in the format:
+ * airbyte/networkSecurityTokenHash: sha256(token, salt)
+ *
+ * These will be cached to avoid hitting the kube API every  single time (should change infrequently)
+ */
+@Singleton
+class PodNetworkSecurityLabeler(
+  private val networkPolicyFetcher: NetworkPolicyFetcher?,
+  cacheManager: CacheManager<Any>,
+  private val hasher: Hasher,
+) {
+  private val cache = cacheManager.getCache("network-policy-label-cache")
+
+  fun getLabels(
+    workspaceId: UUID?,
+    networkSecurityTokens: List<String>,
+  ): Map<String, String> {
+    return workspaceId?.let { workspaceId ->
+      networkPolicyFetcher?.let { networkPolicyFetcher ->
+        if (networkSecurityTokens.isEmpty()) {
+          // Short circuit if we have no tokens to fetch policies for
+          return emptyMap()
+        }
+        try {
+          val cacheKey = "$workspaceId:${networkSecurityTokens.sorted()}"
+          val cachedLabels = cache.get(cacheKey, Map::class.java)
+          if (cachedLabels.isPresent && cachedLabels.get().isNotEmpty()) {
+            @Suppress("UNCHECKED_CAST")
+            return cachedLabels.get() as Map<String, String>
+          }
+          val matchingNetworkPolicies = networkPolicyFetcher.matchingNetworkPolicies(workspaceId, networkSecurityTokens, hasher)
+
+          val labels = flatten(matchingNetworkPolicies.map { it.spec.podSelector.matchLabels })
+          cache.put(cacheKey, labels)
+          return labels
+        } catch (e: Exception) {
+          logger.error(e) { "Failed to get network security labels for workspace $workspaceId" }
+          return emptyMap()
+        }
+      } ?: run {
+        logger.debug { "NetworkPolicyFetcher is null, skipping network security labels" }
+        emptyMap()
+      }
+    } ?: run {
+      logger.debug { "Workspace ID is null, skipping network security labels" }
+      emptyMap()
+    }
+  }
+
+  private fun <K, V> flatten(list: List<Map<K, V>>): Map<K, V> =
+    mutableMapOf<K, V>().apply {
+      for (innerMap in list) putAll(innerMap)
+    }
+}
+
+@Singleton
+@Requires(property = WORKLOAD_LAUNCHER_NETWORK_POLICY_INTROSPECTION, value = "true")
+class NetworkPolicyFetcher(
+  private val kubernetesClient: KubernetesClient,
+) {
+  private val tokenHashKey = NetworkPolicyConstants.TOKEN_HASH_LABEL_KEY
+  private val salt = NetworkPolicyConstants.TOKEN_HASH_SALT
+  private val workspaceIdLabelKey = NetworkPolicyConstants.WORKSPACE_ID_LABEL_KEY
+
+  fun matchingNetworkPolicies(
+    workspaceId: UUID,
+    networkSecurityTokens: List<String>,
+    hasher: Hasher,
+  ): List<NetworkPolicy> {
+    // Need to truncate the token because labels can only be so long
+    val hashedTokens = networkSecurityTokens.map { hasher.hash(it, salt).slice(IntRange(0, NetworkPolicyConstants.TOKEN_HASH_TRUNCATION_LENGTH - 1)) }
+    return kubernetesClient
+      .network()
+      .networkPolicies()
+      .inNamespace(NetworkPolicyConstants.NETWORK_POLICY_NAMESPACE)
+      .withLabelIn(tokenHashKey, *hashedTokens.toTypedArray())
+      .withLabel(workspaceIdLabelKey, workspaceId.toString())
+      .list()
+      .items
+  }
+}

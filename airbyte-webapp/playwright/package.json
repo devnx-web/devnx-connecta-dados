@@ -1,0 +1,22 @@
+{
+  "name": "playwright",
+  "version": "1.0.0",
+  "packageManager": "pnpm@8.6.12",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "test": "node ./scripts/run-playwright.js",
+    "setup": "./scripts/postgres-setup.sh && ./scripts/dummy-api-setup.sh",
+    "cleanup": "./scripts/postgres-cleanup.sh && ./scripts/dummy-api-cleanup.sh"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "devDependencies": {
+    "@playwright/test": "^1.52.0",
+    "@types/node": "^22.15.3",
+    "express": "^4.18.1",
+    "optionator": "^0.9.3",
+    "uuid": "^11.1.0"
+  }
+}

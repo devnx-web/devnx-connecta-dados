@@ -1,0 +1,65 @@
+@use "scss/variables";
+@use "scss/z-indices";
+@use "scss/colors";
+
+.selectConnectionTags {
+  position: relative;
+  z-index: z-indices.$dropdownMenu;
+  width: variables.$width-extra-wide-menu;
+  background: colors.$foreground;
+  border-radius: variables.$border-radius-sm;
+  box-shadow: variables.$box-shadow-raised;
+  overflow: auto;
+
+  &__trigger {
+    padding: 0;
+    height: variables.$tag-height;
+    width: variables.$tag-height;
+  }
+
+  ul,
+  li {
+    list-style-type: none;
+    padding: 0;
+    margin: 0;
+  }
+
+  &__input {
+    border: none;
+    border-radius: 0;
+    border-bottom: variables.$border-thin solid colors.$grey-100;
+
+    &:focus-within {
+      border-bottom: variables.$border-thin solid colors.$grey-100;
+    }
+  }
+
+  &__tags {
+    overflow: auto;
+    max-height: variables.$height-long-listbox-options-list;
+  }
+
+  &__tagRow {
+    width: 100%;
+    border: none;
+    background: none;
+    padding: variables.$spacing-md variables.$spacing-md;
+
+    &:not(&--disabled):hover,
+    &:not(&--disabled):focus-within {
+      background-color: colors.$blue-50;
+    }
+
+    &--disabled {
+      background-color: colors.$grey-50;
+
+      p {
+        color: colors.$grey-400;
+      }
+    }
+  }
+
+  &__tagRowTooltip {
+    width: 100%;
+  }
+}

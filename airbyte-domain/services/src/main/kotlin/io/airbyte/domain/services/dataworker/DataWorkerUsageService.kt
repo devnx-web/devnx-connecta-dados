@@ -1,0 +1,598 @@
+/*
+ * Copyright (c) 2020-2026 Airbyte, Inc., all rights reserved.
+ */
+
+package io.airbyte.domain.services.dataworker
+
+import io.airbyte.commons.entitlements.EntitlementService
+import io.airbyte.config.DataplaneGroup
+import io.airbyte.config.Job
+import io.airbyte.config.JobConfig
+import io.airbyte.config.StandardWorkspace
+import io.airbyte.data.repositories.DataWorkerUsageReservationRepository
+import io.airbyte.data.repositories.entities.DataWorkerUsage
+import io.airbyte.data.repositories.entities.DataWorkerUsageReservation
+import io.airbyte.data.services.DataWorkerUsageDataService
+import io.airbyte.data.services.DataplaneGroupService
+import io.airbyte.data.services.OrganizationService
+import io.airbyte.data.services.WorkspaceService
+import io.airbyte.domain.models.DataplaneGroupId
+import io.airbyte.domain.models.EntitlementPlan
+import io.airbyte.domain.models.OrganizationId
+import io.airbyte.domain.models.WorkspaceId
+import io.airbyte.domain.models.dataworker.DataWorkerUsageWithTime
+import io.airbyte.domain.models.dataworker.DataplaneGroupDataWorkerUsage
+import io.airbyte.domain.models.dataworker.OrganizationDataWorkerUsage
+import io.airbyte.domain.models.dataworker.WorkspaceDataWorkerUsage
+import io.airbyte.featureflag.EnableDataWorkerUsage
+import io.airbyte.featureflag.FeatureFlagClient
+import io.airbyte.featureflag.Organization
+import io.airbyte.metrics.MetricAttribute
+import io.airbyte.metrics.MetricClient
+import io.airbyte.metrics.OssMetricsRegistry
+import io.airbyte.metrics.lib.MetricTags
+import io.github.oshai.kotlinlogging.KotlinLogging
+import io.micronaut.transaction.TransactionOperations
+import jakarta.inject.Named
+import jakarta.inject.Singleton
+import java.sql.Connection
+import java.time.LocalDate
+import java.time.OffsetDateTime
+import java.time.ZoneOffset
+import java.util.UUID
+
+private val logger = KotlinLogging.logger {}
+
+@Singleton
+open class DataWorkerUsageService(
+  private val organizationService: OrganizationService,
+  private val dataplaneGroupService: DataplaneGroupService,
+  private val dataWorkerUsageDataService: DataWorkerUsageDataService,
+  private val dataWorkerUsageReservationRepository: DataWorkerUsageReservationRepository,
+  private val workspaceService: WorkspaceService,
+  private val featureFlagClient: FeatureFlagClient,
+  private val entitlementService: EntitlementService,
+  private val metricClient: MetricClient,
+  @param:Named("config") private val configTransactionOperations: TransactionOperations<Connection>,
+) {
+  /**
+   * Records data worker usage when a job is created by tracking CPU resource requirements.
+   *
+   * This function implements an hourly bucketing system for tracking cumulative resource usage:
+   * - If no recent bucket exists or the most recent bucket is more than 1 hour old, a new hourly
+   *   bucket is created with the current job's CPU values added to the previous bucket's values
+   * - If a bucket exists within the current hour, the existing bucket is updated by adding the
+   *   new job's CPU requirements and recalculating the maximum values
+   *
+   * The function validates that the job meets the following criteria before recording usage:
+   * 1. The job must be a sync job
+   * 2. The data worker usage feature flag must be enabled for the organization
+   * 3. The organization must be on a Pro, Flex, or SME plan
+   *
+   * CPU resources tracked include:
+   * - Source connector CPU request
+   * - Destination connector CPU request
+   * - Orchestrator CPU request
+   *
+   * @param job The job for which to record data worker usage. Must be a sync job with valid
+   *            resource requirements and an associated workspace/organization.
+   */
+  open fun insertUsageForCreatedJob(job: Job) {
+    // We return early here if we cannot build a dataWorkerUsage object.
+    // Errors, logging, and metrics are handled inside the buildDataWorkerUsageOrNull method.
+    val dataWorkerUsage = prepareUsageForJob(job, INCREMENT_OPERATION) ?: return
+
+    // In this function, we check the following:
+    // 1. is the job a sync
+    // 2. is the organization entitled (ie. is this an enterprise organization)
+    // 3. is the feature flag enabled for this organization
+    // if any of these are not true, we do not record usage.
+    if (!isJobValidForInsertion(job, dataWorkerUsage.organizationId)) {
+      logger.debug { "Job ${job.id} for org ${dataWorkerUsage.organizationId} is not valid for data worker usage insertion." }
+      return
+    }
+
+    try {
+      configTransactionOperations.executeWrite { _ ->
+        reserveUsageForJob(job.id, dataWorkerUsage, usedOnDemandCapacity = false)
+      }
+    } catch (e: Exception) {
+      logger.error(e) { "${e.message}: failed to insert data worker usage: $dataWorkerUsage" }
+      recordUsageMetric(job.id, false, INCREMENT_OPERATION, dataWorkerUsage)
+      return
+    }
+
+    recordUsageMetric(job.id, true, INCREMENT_OPERATION, dataWorkerUsage)
+  }
+
+  open fun performUsageInsertion(dataWorkerUsage: DataWorkerUsage) {
+    val mostRecentUsageBucket =
+      dataWorkerUsageDataService.findMostRecentUsageBucket(
+        dataWorkerUsage.organizationId,
+        dataWorkerUsage.workspaceId,
+        dataWorkerUsage.dataplaneGroupId,
+        dataWorkerUsage.bucketStart,
+      )
+
+    if (mostRecentUsageBucket == null || dataWorkerUsage.bucketStart.isAfter(mostRecentUsageBucket.bucketStart.plusHours(1))) {
+      // If there is no most recent usage, or recent usage is older than one hour,
+      // we must create a new bucket, carrying over previous usage values.
+      // We calculate a new max, which is the previous bucket's cpu values + the new job's cpu values
+      val newSourceCpuRequest = (mostRecentUsageBucket?.sourceCpuRequest ?: 0.0) + dataWorkerUsage.sourceCpuRequest
+      val newDestCpuRequest = (mostRecentUsageBucket?.destinationCpuRequest ?: 0.0) + dataWorkerUsage.destinationCpuRequest
+      val newOrchCpuRequest = (mostRecentUsageBucket?.orchestratorCpuRequest ?: 0.0) + dataWorkerUsage.orchestratorCpuRequest
+
+      val usageWithNewCpuValues =
+        dataWorkerUsage.copy(
+          sourceCpuRequest = newSourceCpuRequest,
+          destinationCpuRequest = newDestCpuRequest,
+          orchestratorCpuRequest = newOrchCpuRequest,
+          maxSourceCpuRequest = newSourceCpuRequest,
+          maxDestinationCpuRequest = newDestCpuRequest,
+          maxOrchestratorCpuRequest = newOrchCpuRequest,
+        )
+      logger.info { "Data worker usage addition detected a new bucket is required. Creating a new bucket with values: $usageWithNewCpuValues" }
+
+      dataWorkerUsageDataService.insertNewDataWorkerUsageBucket(usageWithNewCpuValues)
+    } else {
+      // Otherwise we can update the existing bucket. Incrementing the current usage values
+      // and calculating a new maximum will be handled by the SQL query in the repository,
+      // so we just pass in the dataWorkerUsage object as is.
+      val rowsUpdated = dataWorkerUsageDataService.incrementExistingDataWorkerUsageBucket(dataWorkerUsage)
+      if (rowsUpdated == 0) {
+        // The bucket that findMostRecentUsageBucket returned no longer matches the UPDATE's
+        // WHERE clause (which targets DATE_TRUNC('hour', bucketStart)). This can happen at
+        // hour boundaries when the SELECT and UPDATE resolve to different truncated hours.
+        // Fall back to creating a new bucket so the increment is not silently lost.
+        logger.warn {
+          "incrementExistingDataWorkerUsageBucket updated 0 rows for $dataWorkerUsage. " +
+            "Falling back to inserting a new bucket to prevent leaked CPU values."
+        }
+        val newSourceCpuRequest = mostRecentUsageBucket.sourceCpuRequest + dataWorkerUsage.sourceCpuRequest
+        val newDestCpuRequest = mostRecentUsageBucket.destinationCpuRequest + dataWorkerUsage.destinationCpuRequest
+        val newOrchCpuRequest = mostRecentUsageBucket.orchestratorCpuRequest + dataWorkerUsage.orchestratorCpuRequest
+        val usageWithNewCpuValues =
+          dataWorkerUsage.copy(
+            sourceCpuRequest = newSourceCpuRequest,
+            destinationCpuRequest = newDestCpuRequest,
+            orchestratorCpuRequest = newOrchCpuRequest,
+            maxSourceCpuRequest = newSourceCpuRequest,
+            maxDestinationCpuRequest = newDestCpuRequest,
+            maxOrchestratorCpuRequest = newOrchCpuRequest,
+          )
+        dataWorkerUsageDataService.insertNewDataWorkerUsageBucket(usageWithNewCpuValues)
+      }
+    }
+  }
+
+  private fun performUsageSubtraction(
+    dataWorkerUsage: DataWorkerUsage,
+    jobId: Long,
+  ) {
+    val mostRecentUsageBucket =
+      dataWorkerUsageDataService.findMostRecentUsageBucket(
+        dataWorkerUsage.organizationId,
+        dataWorkerUsage.workspaceId,
+        dataWorkerUsage.dataplaneGroupId,
+        dataWorkerUsage.bucketStart,
+      )
+
+    if (mostRecentUsageBucket == null) {
+      // Upon subtraction, if no previous bucket exists, there is nothing to subtract from.
+      // This scenario can occur because we do not perform entitlement/flag checks upon subtraction,
+      // meaning we may attempt to perform an operation for a job that should never be recorded.
+      logger.info { "Found a completed job $jobId with no prior usage recorded, skipping data worker usage for $dataWorkerUsage" }
+      return
+    } else if (dataWorkerUsage.bucketStart.isAfter(mostRecentUsageBucket.bucketStart.plusHours(1))) {
+      // If the most recent usage is older than one hour,
+      // we must create a new bucket, carrying over previous usage values.
+      // We calculate a new max, which is the previous buckets cpu values - the new jobs cpu values
+      // We coerce the values to be at least 0.0 to prevent negative values
+      val newSourceCpuRequest = (mostRecentUsageBucket.sourceCpuRequest - dataWorkerUsage.sourceCpuRequest).coerceAtLeast(0.0)
+      val newDestCpuRequest = (mostRecentUsageBucket.destinationCpuRequest - dataWorkerUsage.destinationCpuRequest).coerceAtLeast(0.0)
+      val newOrchCpuRequest = (mostRecentUsageBucket.orchestratorCpuRequest - dataWorkerUsage.orchestratorCpuRequest).coerceAtLeast(0.0)
+
+      val usageWithNewCpuValues =
+        dataWorkerUsage.copy(
+          sourceCpuRequest = newSourceCpuRequest,
+          destinationCpuRequest = newDestCpuRequest,
+          orchestratorCpuRequest = newOrchCpuRequest,
+          maxSourceCpuRequest = newSourceCpuRequest,
+          maxDestinationCpuRequest = newDestCpuRequest,
+          maxOrchestratorCpuRequest = newOrchCpuRequest,
+        )
+      logger.info { "Data worker usage subtraction detected a new bucket is required. Creating a new bucket with values: $usageWithNewCpuValues" }
+
+      dataWorkerUsageDataService.insertNewDataWorkerUsageBucket(usageWithNewCpuValues)
+    } else {
+      // In this case, we only need to decrement existing values, which is handled
+      // by the SQL query in the repository. We can pass in the dataWorkerUsage object as is.
+      val rowsUpdated = dataWorkerUsageDataService.decrementExistingDataWorkerUsageBucket(dataWorkerUsage)
+      if (rowsUpdated == 0) {
+        // The bucket that findMostRecentUsageBucket returned no longer matches the UPDATE's
+        // WHERE clause (which targets DATE_TRUNC('hour', bucketStart)). This can happen at
+        // hour boundaries when the SELECT and UPDATE resolve to different truncated hours.
+        // Fall back to creating a new bucket with the subtracted values so the decrement is not silently lost.
+        logger.warn {
+          "decrementExistingDataWorkerUsageBucket updated 0 rows for job $jobId with $dataWorkerUsage. " +
+            "Falling back to inserting a new bucket to prevent leaked CPU values."
+        }
+        val newSourceCpuRequest = (mostRecentUsageBucket.sourceCpuRequest - dataWorkerUsage.sourceCpuRequest).coerceAtLeast(0.0)
+        val newDestCpuRequest = (mostRecentUsageBucket.destinationCpuRequest - dataWorkerUsage.destinationCpuRequest).coerceAtLeast(0.0)
+        val newOrchCpuRequest = (mostRecentUsageBucket.orchestratorCpuRequest - dataWorkerUsage.orchestratorCpuRequest).coerceAtLeast(0.0)
+        val usageWithNewCpuValues =
+          dataWorkerUsage.copy(
+            sourceCpuRequest = newSourceCpuRequest,
+            destinationCpuRequest = newDestCpuRequest,
+            orchestratorCpuRequest = newOrchCpuRequest,
+            maxSourceCpuRequest = newSourceCpuRequest,
+            maxDestinationCpuRequest = newDestCpuRequest,
+            maxOrchestratorCpuRequest = newOrchCpuRequest,
+          )
+        dataWorkerUsageDataService.insertNewDataWorkerUsageBucket(usageWithNewCpuValues)
+      }
+    }
+  }
+
+  /**
+   * Retrieves aggregated data worker usage for an organization over a specified date range.
+   *
+   * This function queries and aggregates usage data with the following structure:
+   * - Organization level: Contains all dataplane groups
+   * - Dataplane group level: Groups usage by dataplane group, containing all workspaces
+   * - Workspace level: Groups usage by workspace, containing hourly usage data
+   * - Hourly level: Individual hourly buckets with CPU usage and calculated data worker counts
+   *
+   * The function performs several transformations on the raw usage data:
+   * 1. Retrieves all usage records for the organization within the date range
+   * 2. Groups records by dataplane group ID and workspace ID
+   * 3. Aggregates hourly records by summing CPU requests across source, destination, and orchestrator
+   * 4. Calculates data worker counts based on total CPU usage (divided by 8)
+   * 5. Filters out any dataplane groups or workspaces that no longer exist
+   *
+   * Time range handling:
+   * - Start date is converted to 00:00:00 UTC
+   * - End date is converted to 23:59:59 UTC
+   *
+   * @param organizationId The UUID of the organization to retrieve usage for
+   * @param startDate The start date (inclusive) of the usage period
+   * @param endDate The end date (inclusive) of the usage period
+   * @return An [OrganizationDataWorkerUsage] object containing hierarchical usage data grouped
+   *         by dataplane groups and workspaces, with hourly usage details
+   */
+  fun getDataWorkerUsage(
+    organizationId: UUID,
+    startDate: LocalDate,
+    endDate: LocalDate,
+  ): OrganizationDataWorkerUsage {
+    val startDateTime = startDate.atStartOfDay(ZoneOffset.UTC).toOffsetDateTime()
+    val endDateTime = endDate.atTime(23, 59, 59).atZone(ZoneOffset.UTC).toOffsetDateTime()
+
+    val usageRecords =
+      dataWorkerUsageDataService.getDataWorkerUsageByOrganizationAndTimeRange(
+        organizationId,
+        startDateTime,
+        endDateTime,
+      )
+
+    val dataplaneGroups =
+      usageRecords
+        .groupBy { it.dataplaneGroupId }
+        .mapNotNull { (dataplaneGroupId, entries) ->
+          val dataplaneGroup = retrieveDataplaneGroupOrNull(dataplaneGroupId) ?: return@mapNotNull null
+
+          DataplaneGroupDataWorkerUsage(
+            dataplaneGroupId = DataplaneGroupId(dataplaneGroupId),
+            dataplaneGroupName = dataplaneGroup.name,
+            workspaces =
+              entries
+                .groupBy { it.workspaceId }
+                .mapNotNull { (workspaceId, records) ->
+                  val workspace = retrieveWorkspaceOrNull(workspaceId) ?: return@mapNotNull null
+                  val hourlyUsage =
+                    records
+                      .groupBy { it.bucketStart }
+                      .map { (hour, hourRecords) ->
+                        DataWorkerUsageWithTime(
+                          usageStartTime = hour,
+                          currentUsage = hourRecords.sumOf { it.sourceCpuRequest + it.destinationCpuRequest + it.orchestratorCpuRequest },
+                          dataWorkers = hourRecords.sumOf { it.calculateDataWorkers() },
+                        )
+                      }.sortedBy { it.usageStartTime }
+
+                  WorkspaceDataWorkerUsage(
+                    workspaceId = WorkspaceId(workspaceId),
+                    workspaceName = workspace.name,
+                    dataWorkers = hourlyUsage,
+                  )
+                },
+          )
+        }
+
+    return OrganizationDataWorkerUsage(
+      organizationId = OrganizationId(organizationId),
+      dataplaneGroups = dataplaneGroups,
+    )
+  }
+
+  /**
+   * Builds usage metadata before the caller opens a transaction.
+   */
+  open fun prepareUsageForJob(
+    job: Job,
+    operation: String = INCREMENT_OPERATION,
+  ): DataWorkerUsage? = buildDataWorkerUsageOrNull(job, operation)
+
+  /**
+   * Builds usage metadata when the caller already knows the organization id.
+   */
+  open fun prepareUsageForJob(
+    job: Job,
+    organizationId: UUID,
+    operation: String = INCREMENT_OPERATION,
+  ): DataWorkerUsage? = buildDataWorkerUsageOrNull(job, organizationId, operation)
+
+  private fun buildDataWorkerUsageOrNull(
+    job: Job,
+    operation: String,
+  ): DataWorkerUsage? {
+    val workspaceId = job.config.sync?.workspaceId
+    if (workspaceId == null) {
+      logger.error { "Workspace ID is null for job ${job.id}, skipping data worker usage insertion." }
+      sendRecordMetric(job.id, false, operation)
+      return null
+    }
+
+    val organization = organizationService.getOrganizationForWorkspaceId(workspaceId).orElse(null)
+    if (organization == null) {
+      logger.error { "Organization not found for workspace $workspaceId (job ${job.id}), skipping data worker usage insertion." }
+      sendRecordMetric(job.id, false, operation, workspaceId = workspaceId)
+      return null
+    }
+
+    val organizationId = organization.organizationId
+    return buildDataWorkerUsageOrNull(job, organizationId, operation)
+  }
+
+  private fun buildDataWorkerUsageOrNull(
+    job: Job,
+    organizationId: UUID,
+    operation: String,
+  ): DataWorkerUsage? {
+    val workspaceId = job.config.sync?.workspaceId
+    if (workspaceId == null) {
+      logger.error { "Workspace ID is null for job ${job.id}, skipping data worker usage insertion." }
+      sendRecordMetric(job.id, false, operation)
+      return null
+    }
+
+    val workspace = retrieveWorkspaceOrNull(workspaceId) ?: return null
+    val dataplaneGroupId =
+      workspace.dataplaneGroupId ?: run {
+        logger.error {
+          "Dataplane group is null for workspace $workspaceId and org id $organizationId (job ${job.id}), skipping data worker usage insertion."
+        }
+        sendRecordMetric(job.id, false, operation, organizationId, workspaceId)
+        return null
+      }
+
+    val sourceCpu = job.config.sync.syncResourceRequirements.source.cpuRequest
+    val destCpu = job.config.sync.syncResourceRequirements.destination.cpuRequest
+    val orchCpu = job.config.sync.syncResourceRequirements.orchestrator.cpuRequest
+    if (!areJobResourceRequirementsValid(sourceCpu, destCpu, orchCpu)) {
+      logger.error {
+        "Found invalid resource requirements in job configuration: ${job.config.sync.syncResourceRequirements}, skipping data worker usage insertion."
+      }
+      sendRecordMetric(job.id, false, operation, organizationId, workspaceId, dataplaneGroupId)
+      return null
+    }
+
+    // We use the current timestamp of insertion as the job start and end time. This avoids any edge
+    // cases around delayed job ends or mismatched job start/end timestamps that could pollute stored data.
+    return DataWorkerUsage(
+      organizationId = organizationId,
+      workspaceId = workspaceId,
+      dataplaneGroupId = dataplaneGroupId,
+      sourceCpuRequest = sourceCpu.toDouble(),
+      destinationCpuRequest = destCpu.toDouble(),
+      orchestratorCpuRequest = orchCpu.toDouble(),
+      bucketStart = OffsetDateTime.now(ZoneOffset.UTC),
+      createdAt = OffsetDateTime.now(ZoneOffset.UTC),
+      maxSourceCpuRequest = sourceCpu.toDouble(),
+      maxDestinationCpuRequest = destCpu.toDouble(),
+      maxOrchestratorCpuRequest = orchCpu.toDouble(),
+    )
+  }
+
+  private fun isJobValidForInsertion(
+    job: Job,
+    organizationId: UUID,
+  ): Boolean {
+    val isSync = job.configType == JobConfig.ConfigType.SYNC
+    val flagEnabled = featureFlagClient.boolVariation(EnableDataWorkerUsage, Organization(organizationId))
+
+    val planId = entitlementService.getCurrentPlanId(OrganizationId(organizationId))
+    val isEntitled = VALID_PLANS.contains(planId)
+
+    return isSync && flagEnabled && isEntitled
+  }
+
+  private fun areJobResourceRequirementsValid(
+    sourceCpu: String,
+    destCpu: String,
+    orchCpu: String,
+  ): Boolean =
+    try {
+      sourceCpu.toDouble()
+      destCpu.toDouble()
+      orchCpu.toDouble()
+      true
+    } catch (_: Exception) {
+      false
+    }
+
+  private fun retrieveDataplaneGroupOrNull(dataplaneGroupId: UUID): DataplaneGroup? {
+    try {
+      return dataplaneGroupService.getDataplaneGroup(dataplaneGroupId)
+    } catch (e: Exception) {
+      logger.error(e) { "Failed to fetch dataplane group $dataplaneGroupId, skipping usage retrieval" }
+      return null
+    }
+  }
+
+  private fun retrieveWorkspaceOrNull(workspaceId: UUID): StandardWorkspace? {
+    try {
+      return workspaceService.getStandardWorkspaceNoSecrets(workspaceId, false)
+    } catch (e: Exception) {
+      logger.error(e) { "Failed to fetch workspace $workspaceId, skipping usage retrieval" }
+      return null
+    }
+  }
+
+  /**
+   * We sometimes call this function before org/workspace/dataplaneGroup ID's
+   * are available, for example, when retrieving any of those values fails.
+   * Therefore, those parameters are optional.
+   */
+  private fun sendRecordMetric(
+    jobId: Long,
+    wasSuccess: Boolean,
+    operation: String,
+    organizationId: UUID? = null,
+    workspaceId: UUID? = null,
+    dataplaneGroupId: UUID? = null,
+  ) {
+    try {
+      val attributes =
+        listOfNotNull(
+          MetricAttribute(MetricTags.JOB_ID, jobId.toString()),
+          MetricAttribute(MetricTags.SUCCESS, wasSuccess.toString()),
+          MetricAttribute(MetricTags.DATA_WORKER_USAGE_OPERATION, operation),
+          organizationId?.let { MetricAttribute(MetricTags.ORGANIZATION_ID, it.toString()) },
+          workspaceId?.let { MetricAttribute(MetricTags.WORKSPACE_ID, it.toString()) },
+          dataplaneGroupId?.let { MetricAttribute(MetricTags.DATA_PLANE_GROUP_TAG, it.toString()) },
+        )
+
+      metricClient.count(
+        OssMetricsRegistry.DATA_WORKER_USAGE_RECORDED,
+        attributes = attributes.toTypedArray(),
+      )
+    } catch (e: Exception) {
+      logger.warn(e) { "Failed to emit data worker usage metric for job $jobId" }
+    }
+  }
+
+  fun recordUsageMetric(
+    jobId: Long,
+    wasSuccess: Boolean,
+    operation: String,
+    dataWorkerUsage: DataWorkerUsage,
+  ) {
+    sendRecordMetric(
+      jobId,
+      wasSuccess,
+      operation,
+      dataWorkerUsage.organizationId,
+      dataWorkerUsage.workspaceId,
+      dataWorkerUsage.dataplaneGroupId,
+    )
+  }
+
+  /**
+   * Idempotently reserves precomputed usage inside an already-open config transaction.
+   */
+  open fun reserveUsageForJob(
+    jobId: Long,
+    dataWorkerUsage: DataWorkerUsage,
+    usedOnDemandCapacity: Boolean,
+  ) {
+    if (dataWorkerUsageReservationRepository.existsById(jobId)) {
+      logger.info { "Data worker usage reservation already exists for job $jobId, skipping duplicate reservation." }
+      return
+    }
+
+    persistReservedUsageForJob(jobId, dataWorkerUsage, usedOnDemandCapacity)
+  }
+
+  /**
+   * Persists precomputed usage inside an already-open config transaction.
+   *
+   * Caller must already have established idempotency for the job id.
+   */
+  open fun persistReservedUsageForJob(
+    jobId: Long,
+    dataWorkerUsage: DataWorkerUsage,
+    usedOnDemandCapacity: Boolean,
+  ) {
+    dataWorkerUsageReservationRepository.save(
+      DataWorkerUsageReservation(
+        jobId = jobId,
+        organizationId = dataWorkerUsage.organizationId,
+        workspaceId = dataWorkerUsage.workspaceId,
+        dataplaneGroupId = dataWorkerUsage.dataplaneGroupId,
+        sourceCpuRequest = dataWorkerUsage.sourceCpuRequest,
+        destinationCpuRequest = dataWorkerUsage.destinationCpuRequest,
+        orchestratorCpuRequest = dataWorkerUsage.orchestratorCpuRequest,
+        usedOnDemandCapacity = usedOnDemandCapacity,
+        createdAt = OffsetDateTime.now(ZoneOffset.UTC),
+      ),
+    )
+    performUsageInsertion(dataWorkerUsage)
+  }
+
+  /**
+   * Releases Data Worker usage that was previously reserved for a job.
+   *
+   * If no reservation exists, this method is a no-op so terminal job cleanup remains idempotent.
+   */
+  open fun releaseReservedUsageForJob(jobId: Long) {
+    var reservationForFailureMetric: DataWorkerUsageReservation? = null
+
+    try {
+      val releasedReservation =
+        configTransactionOperations.executeWrite { _ ->
+          val reservation = dataWorkerUsageReservationRepository.findById(jobId).orElse(null)
+          if (reservation == null) {
+            logger.info { "No data worker usage reservation found for job $jobId, skipping release." }
+            return@executeWrite null
+          }
+
+          reservationForFailureMetric = reservation
+          performUsageSubtraction(reservation.toDataWorkerUsage(), jobId)
+          dataWorkerUsageReservationRepository.deleteById(jobId)
+          reservation
+        } ?: return
+
+      recordUsageMetric(jobId, true, DECREMENT_OPERATION, releasedReservation.toDataWorkerUsage())
+    } catch (e: Exception) {
+      logger.error(e) { "${e.message}: failed to release data worker usage for job $jobId" }
+      reservationForFailureMetric?.let {
+        recordUsageMetric(jobId, false, DECREMENT_OPERATION, it.toDataWorkerUsage())
+      }
+      throw e
+    }
+  }
+
+  private fun DataWorkerUsageReservation.toDataWorkerUsage(): DataWorkerUsage {
+    val now = OffsetDateTime.now(ZoneOffset.UTC)
+    return DataWorkerUsage(
+      organizationId = organizationId,
+      workspaceId = workspaceId,
+      dataplaneGroupId = dataplaneGroupId,
+      sourceCpuRequest = sourceCpuRequest,
+      destinationCpuRequest = destinationCpuRequest,
+      orchestratorCpuRequest = orchestratorCpuRequest,
+      bucketStart = now,
+      createdAt = now,
+      maxSourceCpuRequest = sourceCpuRequest,
+      maxDestinationCpuRequest = destinationCpuRequest,
+      maxOrchestratorCpuRequest = orchestratorCpuRequest,
+    )
+  }
+
+  companion object {
+    val VALID_PLANS = setOf(EntitlementPlan.PRO.id, EntitlementPlan.FLEX.id, EntitlementPlan.SME.id)
+    const val INCREMENT_OPERATION = "INCREMENT"
+    const val DECREMENT_OPERATION = "DECREMENT"
+  }
+}

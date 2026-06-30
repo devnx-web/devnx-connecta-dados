@@ -1,0 +1,42 @@
+@use "scss/colors";
+@use "scss/variables";
+@use "scss/mixins";
+
+.radioButtonTiles {
+  &__toggle {
+    flex-grow: 1;
+    position: relative;
+    z-index: 0;
+    padding: variables.$spacing-lg;
+    border: variables.$border-thin solid colors.$grey-100;
+    border-radius: variables.$border-radius-sm;
+    cursor: pointer;
+
+    &--disabled {
+      cursor: not-allowed;
+    }
+
+    &--light {
+      border: none;
+      outline: none;
+      padding-top: 0;
+      padding-bottom: 0;
+    }
+  }
+
+  &__tile {
+    flex: 1 1 auto;
+
+    &[data-checked] {
+      .radioButtonTiles__toggle {
+        border-color: colors.$blue;
+      }
+    }
+
+    &:focus-visible {
+      .radioButtonTiles__toggle {
+        outline: variables.$border-thick solid colors.$blue-900;
+      }
+    }
+  }
+}

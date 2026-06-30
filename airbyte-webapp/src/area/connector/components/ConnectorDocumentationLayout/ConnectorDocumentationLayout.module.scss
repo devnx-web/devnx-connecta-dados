@@ -1,0 +1,11 @@
+@use "scss/variables";
+@use "scss/mixins";
+@use "scss/colors";
+
+.rightPanel {
+  @include mixins.left-shadow;
+
+  background-color: colors.$foreground;
+  border-top-left-radius: variables.$border-radius-lg;
+  border-bottom-left-radius: variables.$border-radius-lg;
+}

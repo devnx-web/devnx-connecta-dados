@@ -1,0 +1,552 @@
+/*
+ * Copyright (c) 2020-2026 Airbyte, Inc., all rights reserved.
+ */
+
+package io.airbyte.server.services
+
+import io.airbyte.commons.annotation.InternalForTesting
+import io.airbyte.config.Attempt
+import io.airbyte.config.JobConfig
+import io.airbyte.config.StandardSyncSummary
+import io.airbyte.config.StreamDescriptor
+import io.airbyte.data.repositories.entities.ObsJobsStats
+import io.airbyte.data.repositories.entities.ObsStreamStats
+import io.airbyte.data.repositories.entities.ObsStreamStatsId
+import io.airbyte.data.services.ActorDefinitionService
+import io.airbyte.data.services.ConnectionService
+import io.airbyte.data.services.ObsStatsService
+import io.airbyte.data.services.WorkspaceService
+import io.airbyte.db.instance.jobs.jooq.generated.enums.JobConfigType
+import io.airbyte.metrics.MetricAttribute
+import io.airbyte.metrics.MetricClient
+import io.airbyte.metrics.OssMetricsRegistry
+import io.airbyte.metrics.lib.MetricTags
+import io.airbyte.persistence.job.JobPersistence
+import io.airbyte.statistics.OutlierEvaluation
+import io.airbyte.statistics.OutlierRule
+import io.airbyte.statistics.Outliers
+import io.airbyte.statistics.Scores
+import io.github.oshai.kotlinlogging.KotlinLogging
+import jakarta.inject.Singleton
+import java.math.BigDecimal
+import java.time.Duration
+import java.time.Instant
+import java.time.OffsetDateTime
+import java.time.ZoneOffset
+import java.util.UUID
+
+data class OutlierOutcome(
+  val job: JobInfo,
+  val streams: List<StreamInfo>,
+  val isOutlier: Boolean,
+  val numberOfHistoricalJobsConsidered: Int,
+  val numberOfOutlierStreams: Int,
+)
+
+data class JobInfo(
+  val jobId: Long,
+  val connectionId: UUID,
+  val workspaceId: UUID,
+  val organizationId: UUID,
+  val sourceId: UUID,
+  val sourceDefinitionId: UUID,
+  val sourceImageName: String,
+  val sourceImageTag: String,
+  val destinationId: UUID,
+  val destinationDefinitionId: UUID,
+  val destinationImageName: String,
+  val destinationImageTag: String,
+  val jobType: String,
+  val jobOutcome: String,
+  val metrics: JobMetrics,
+  val evaluations: List<OutlierEvaluation>,
+  val isOutlier: Boolean,
+)
+
+data class StreamInfo(
+  val namespace: String?,
+  val name: String,
+  val wasBackfilled: Boolean,
+  val wasResumed: Boolean,
+  val metrics: StreamMetrics,
+  val evaluations: List<OutlierEvaluation>,
+  val isOutlier: Boolean,
+)
+
+@Singleton
+class JobObservabilityService(
+  private val actorDefinitionService: ActorDefinitionService,
+  private val connectionService: ConnectionService,
+  private val jobPersistence: JobPersistence,
+  private val obsStatsService: ObsStatsService,
+  private val workspaceService: WorkspaceService,
+  private val metricClient: MetricClient,
+  private val jobObservabilityReportingService: JobObservabilityReportingService?,
+  private val jobObservabilityRulesService: JobObservabilityRulesService,
+  private val streamStatsService: StreamStatsService,
+) {
+  private val logger = KotlinLogging.logger {}
+  private val outliers = Outliers()
+
+  private data class JobDetails(
+    val jobId: Long,
+    val connectionId: UUID,
+    val workspaceId: UUID,
+    val organizationId: UUID,
+    val sourceId: UUID,
+    val sourceDefinitionId: UUID,
+    val sourceImageTag: String,
+    val destinationId: UUID,
+    val destinationDefinitionId: UUID,
+    val destinationImageTag: String,
+    val createdAt: OffsetDateTime,
+    val jobType: String,
+    val status: String,
+    val attemptCount: Int,
+    val durationSeconds: Long,
+  )
+
+  fun finalizeStats(jobId: Long) {
+    val details = fetchJobDetails(jobId)
+
+    val obsJobStats =
+      ObsJobsStats(
+        jobId = jobId,
+        connectionId = details.connectionId,
+        workspaceId = details.workspaceId,
+        organizationId = details.organizationId,
+        sourceId = details.sourceId,
+        sourceDefinitionId = details.sourceDefinitionId,
+        sourceImageTag = details.sourceImageTag,
+        destinationId = details.destinationId,
+        destinationDefinitionId = details.destinationDefinitionId,
+        destinationImageTag = details.destinationImageTag,
+        createdAt = details.createdAt,
+        jobType = details.jobType,
+        status = details.status,
+        attemptCount = details.attemptCount,
+        durationSeconds = details.durationSeconds,
+      )
+    obsStatsService.saveJobsStats(obsJobStats)
+
+    // Use StreamStatsService for aggregated stats with billing-safe logic
+    val aggregatedStats = streamStatsService.getAggregatedStatsForJob(jobId)
+    val streamStatsList =
+      aggregatedStats.map {
+        ObsStreamStats(
+          id =
+            ObsStreamStatsId(
+              jobId = jobId,
+              streamNamespace = it.streamNamespace,
+              streamName = it.streamName,
+            ),
+          bytesLoaded = it.bytesCommitted,
+          recordsLoaded = it.recordsCommitted,
+          recordsRejected = it.recordsRejected,
+          wasBackfilled = it.wasBackfilled,
+          wasResumed = it.wasResumed,
+          additionalStats = it.additionalStats,
+        )
+      }
+    obsStatsService.saveStreamStats(streamStatsList)
+  }
+
+  fun evaluateOutlier(jobId: Long) {
+    // We only consider syncs for outlier detection.
+    // When passing the job type restriction, it will automatically exclude the current job if it isn't as sync as well.
+    val (job, jobHistory) =
+      obsStatsService.findJobStatsAndPrevious(jobId, DEFAULT_INTERVAL, MAX_JOBS_COUNT, JOB_TYPES_TO_CONSIDER).partition {
+        it.jobId ==
+          jobId
+      }
+    if (job.isEmpty()) {
+      logger.info { "Unable to find jobId:$jobId for outlier detection" }
+      return
+    }
+
+    val jobConfig = jobPersistence.getJob(jobId)
+    val configuredStreams =
+      jobConfig.config.sync.configuredAirbyteCatalog.streams
+        .map { it.streamDescriptor }
+        .toSet()
+    val jobInfo = evaluateJob(job.first(), jobHistory)
+
+    val allStreamStats =
+      obsStatsService
+        .findJobStreamStatsAndPrevious(jobId, DEFAULT_INTERVAL, MAX_JOBS_COUNT, JOB_TYPES_TO_CONSIDER)
+    val streams =
+      allStreamStats
+        .groupBy { it.id.streamNamespace to it.id.streamName }
+        // Make sure we only evaluate the streams from the configured catalog
+        .filter { configuredStreams.contains(StreamDescriptor().withNamespace(it.key.first).withName(it.key.second)) }
+        .map { streamStats ->
+          val (currentList, history) = streamStats.value.partition { it.id.jobId == jobId }
+          val current =
+            currentList.firstOrNull()
+              ?: defaultEmptyStatsForStream(jobId = jobId, streamNamespace = streamStats.key.first, streamName = streamStats.key.second)
+          evaluateStream(
+            namespace = streamStats.key.first,
+            name = streamStats.key.second,
+            currentStream = current,
+            streamHistory = history,
+          )
+        }
+
+    val numberOfOutlierStreams = streams.count { it.isOutlier }
+    val outlierOutcome =
+      OutlierOutcome(
+        job = jobInfo,
+        isOutlier = jobInfo.isOutlier || numberOfOutlierStreams > 0,
+        numberOfHistoricalJobsConsidered = jobHistory.size,
+        numberOfOutlierStreams = numberOfOutlierStreams,
+        streams = streams,
+      )
+
+    if (outlierOutcome.isOutlier) {
+      jobObservabilityReportingService?.reportJobOutlierStatus(outlierOutcome)
+      logger.info {
+        "jobId:$jobId has been marked as an outlier. (" +
+          "jobOutlier:${outlierOutcome.job.isOutlier}, " +
+          "outlierStreams:${outlierOutcome.numberOfOutlierStreams}, " +
+          "details:$outlierOutcome)"
+      }
+    }
+    reportOutlierMetric(outlierOutcome)
+  }
+
+  private fun evaluateJob(
+    currentJob: ObsJobsStats,
+    jobHistory: List<ObsJobsStats>,
+  ): JobInfo {
+    val currentJobMetrics = currentJob.toJobMetrics()
+    val jobScore = outliers.getScores(jobHistory.map { it.toJobMetrics() }, currentJobMetrics)
+    val jobEvaluations = evaluateJobOutliers(jobScore)
+
+    val (sourceImage, destImage) = getImageNames(currentJob.jobId)
+    return JobInfo(
+      jobId = currentJob.jobId,
+      connectionId = currentJob.connectionId,
+      workspaceId = currentJob.workspaceId,
+      organizationId = currentJob.organizationId,
+      sourceId = currentJob.sourceId,
+      sourceDefinitionId = currentJob.sourceDefinitionId,
+      sourceImageName = sourceImage,
+      sourceImageTag = currentJob.sourceImageTag,
+      destinationId = currentJob.destinationId,
+      destinationDefinitionId = currentJob.destinationDefinitionId,
+      destinationImageName = destImage,
+      destinationImageTag = currentJob.destinationImageTag,
+      jobType = currentJob.jobType,
+      jobOutcome = currentJob.status,
+      metrics = currentJobMetrics,
+      evaluations = jobEvaluations,
+      isOutlier = jobEvaluations.any { it.isOutlier },
+    )
+  }
+
+  @InternalForTesting
+  internal fun evaluateStream(
+    namespace: String?,
+    name: String,
+    currentStream: ObsStreamStats,
+    streamHistory: List<ObsStreamStats>,
+  ): StreamInfo {
+    // Compute derived stats for current and historical streams
+    val currentStreamMetrics = computeStreamDerivedStats(currentStream.toStreamMetrics())
+    val historicalStreamMetrics = streamHistory.map { computeStreamDerivedStats(it.toStreamMetrics()) }
+
+    // Get scores for top-level fields (bytesLoaded, recordsLoaded, etc.)
+    val streamScore = outliers.getScores(historicalStreamMetrics, currentStreamMetrics)
+
+    // Get scores for additionalStats (which now includes derived stats)
+    val additionalStatsScores =
+      computeAdditionalStatsScores(
+        currentStreamMetrics.additionalStats,
+        historicalStreamMetrics.map { it.additionalStats },
+      )
+
+    // Merge the two score maps
+    val allScores = streamScore + additionalStatsScores
+
+    val streamEvaluations = evaluateStreamOutliers(allScores)
+    return StreamInfo(
+      namespace = namespace,
+      name = name,
+      wasBackfilled = currentStream.wasBackfilled,
+      wasResumed = currentStream.wasResumed,
+      metrics = currentStreamMetrics,
+      evaluations = streamEvaluations,
+      isOutlier = streamEvaluations.any { streamFeatureEval -> streamFeatureEval.isOutlier },
+    )
+  }
+
+  private fun reportOutlierMetric(outlierOutcome: OutlierOutcome) {
+    val isFreshnessOutlier = outlierOutcome.job.isOutlier
+    val isCorrectnessOutlier = outlierOutcome.numberOfOutlierStreams > 0
+
+    val commonTags =
+      listOf(
+        MetricAttribute(MetricTags.CONNECTION_ID, outlierOutcome.job.connectionId.toString()),
+        MetricAttribute(MetricTags.WORKSPACE_ID, outlierOutcome.job.workspaceId.toString()),
+        MetricAttribute(MetricTags.SOURCE_DEFINITION_ID, outlierOutcome.job.sourceDefinitionId.toString()),
+        MetricAttribute(MetricTags.SOURCE_IMAGE, outlierOutcome.job.sourceImageName),
+        MetricAttribute(MetricTags.SOURCE_IMAGE_TAG, outlierOutcome.job.sourceImageTag),
+        MetricAttribute(MetricTags.DESTINATION_DEFINITION_ID, outlierOutcome.job.destinationDefinitionId.toString()),
+        MetricAttribute(MetricTags.DESTINATION_IMAGE, outlierOutcome.job.destinationImageName),
+        MetricAttribute(MetricTags.DESTINATION_IMAGE_TAG, outlierOutcome.job.destinationImageTag),
+      )
+
+    metricClient.count(
+      OssMetricsRegistry.DATA_OBS_OUTLIER_CHECK,
+      1,
+      MetricAttribute(MetricTags.STATUS_TAG, outlierOutcome.isOutlier.toString()),
+      *commonTags.toTypedArray(),
+    )
+
+    metricClient.count(
+      OssMetricsRegistry.DATA_OBS_OUTLIER_CHECK_FRESHNESS,
+      1,
+      MetricAttribute(MetricTags.STATUS_TAG, isFreshnessOutlier.toString()),
+      *commonTags.toTypedArray(),
+    )
+
+    metricClient.count(
+      OssMetricsRegistry.DATA_OBS_OUTLIER_CHECK_CORRECTNESS,
+      1,
+      MetricAttribute(MetricTags.STATUS_TAG, isCorrectnessOutlier.toString()),
+      *commonTags.toTypedArray(),
+    )
+  }
+
+  private fun defaultEmptyStatsForStream(
+    jobId: Long,
+    streamNamespace: String?,
+    streamName: String,
+  ): ObsStreamStats =
+    ObsStreamStats(
+      id =
+        ObsStreamStatsId(
+          jobId = jobId,
+          streamNamespace = streamNamespace,
+          streamName = streamName,
+        ),
+      bytesLoaded = 0,
+      recordsLoaded = 0,
+      recordsRejected = 0,
+      wasBackfilled = false,
+      wasResumed = false,
+    )
+
+  private fun fetchJobDetails(jobId: Long): JobDetails {
+    val job = jobPersistence.getJob(jobId)
+    val connectionId = UUID.fromString(job.scope)
+
+    // Get source and destination info
+    val standardSync = connectionService.getStandardSync(connectionId)
+    val destVersion = actorDefinitionService.getActorDefinitionVersion(getDestinationDefinitionVersionId(job.config))
+    val sourceVersion = getSourceDefinitionVersionId(job.config)?.let { actorDefinitionService.getActorDefinitionVersion(it) }
+
+    // Get workspace and organization
+    val workspaceId = getWorkspaceId(job.config)
+    val orgId = workspaceService.getOrganizationIdFromWorkspaceId(workspaceId).orElse(UUID_ZERO)
+
+    return JobDetails(
+      jobId = jobId,
+      connectionId = connectionId,
+      workspaceId = workspaceId,
+      organizationId = orgId,
+      sourceId = standardSync.sourceId,
+      sourceDefinitionId = sourceVersion?.actorDefinitionId ?: UUID_ZERO,
+      sourceImageTag = sourceVersion?.dockerImageTag ?: "",
+      destinationId = standardSync.destinationId,
+      destinationDefinitionId = destVersion.actorDefinitionId,
+      destinationImageTag = destVersion.dockerImageTag,
+      createdAt = OffsetDateTime.ofInstant(Instant.ofEpochSecond(job.createdAtInSecond), ZoneOffset.UTC),
+      jobType = job.config.configType.toString(),
+      status = job.status.toString(),
+      attemptCount = job.attempts.size,
+      durationSeconds = getDurationSecondsFromAttempts(job.attempts),
+    )
+  }
+
+  private fun getDurationSecondsFromAttempts(attempts: List<Attempt>): Long =
+    attempts.sumOf { attempt ->
+      attempt.output
+        ?.sync
+        ?.standardSyncSummary
+        ?.getDurationSecondsFromSummary() ?: attempt.getDurationsSecondsWhenNoJobOutput()
+    }
+
+  private fun StandardSyncSummary.getDurationSecondsFromSummary(): Long? =
+    // The SyncSummary of a failed attempt may not have start/end times
+    if (endTime != null && startTime != null) {
+      (endTime - startTime) / 1000
+    } else {
+      null
+    }
+
+  private fun Attempt.getDurationsSecondsWhenNoJobOutput(): Long = (endedAtInSecond ?: updatedAtInSecond) - createdAtInSecond
+
+  /**
+   * returns (souceImageName, destinationImageName) for a jobId
+   */
+  private fun getImageNames(jobId: Long): Pair<String, String> {
+    val job = jobPersistence.getJob(jobId)
+    val sourceVersion = getSourceDefinitionVersionId(job.config)?.let { actorDefinitionService.getActorDefinitionVersion(it) }
+    val destVersion = actorDefinitionService.getActorDefinitionVersion(getDestinationDefinitionVersionId(job.config))
+    return Pair(
+      sourceVersion?.dockerRepository ?: "empty-source",
+      destVersion.dockerRepository,
+    )
+  }
+
+  companion object {
+    // Define the limits for the history to consider
+    // The idea is to get at most 28Days of data, however to avoid hourly and more frequent jobs to generate too much data
+    // cap it at 7 days of hourly syncs.
+    private val DEFAULT_INTERVAL = Duration.ofDays(28)
+    private val MAX_JOBS_COUNT = 7 * 24
+    private val JOB_TYPES_TO_CONSIDER = listOf(JobConfigType.sync)
+
+    private val UUID_ZERO: UUID = UUID.fromString("00000000-0000-0000-0000-000000000000")
+
+    @InternalForTesting
+    fun getDestinationDefinitionVersionId(jobConfig: JobConfig): UUID =
+      jobConfig.sync?.destinationDefinitionVersionId
+        ?: jobConfig.resetConnection?.destinationDefinitionVersionId
+        ?: jobConfig.refresh?.destinationDefinitionVersionId
+        ?: UUID_ZERO
+
+    @InternalForTesting
+    fun getSourceDefinitionVersionId(jobConfig: JobConfig): UUID? =
+      jobConfig.sync?.sourceDefinitionVersionId ?: jobConfig.refresh?.sourceDefinitionVersionId
+
+    @InternalForTesting
+    fun getWorkspaceId(jobConfig: JobConfig): UUID =
+      jobConfig.sync?.workspaceId ?: jobConfig.resetConnection?.workspaceId ?: jobConfig.refresh?.workspaceId ?: UUID_ZERO
+  }
+
+  private fun ObsJobsStats.toJobMetrics(): JobMetrics =
+    JobMetrics(
+      attemptCount = attemptCount,
+      durationSeconds = durationSeconds,
+    )
+
+  private fun ObsStreamStats.toStreamMetrics(): StreamMetrics =
+    StreamMetrics(
+      bytesLoaded = bytesLoaded,
+      recordsLoaded = recordsLoaded,
+      recordsRejected = recordsRejected,
+      additionalStats = additionalStats ?: emptyMap(),
+    )
+
+  /**
+   * Compute outlier scores for additionalStats by calling getScores per metric key.
+   */
+  @InternalForTesting
+  internal fun computeAdditionalStatsScores(
+    currentStats: Map<String, BigDecimal>?,
+    historicalStats: List<Map<String, BigDecimal>?>,
+  ): Map<String, Scores> {
+    if (currentStats == null || currentStats.isEmpty()) return emptyMap()
+
+    return currentStats
+      .mapNotNull { (key, currentValue) ->
+        // Collect historical values for this key
+        val historicalValues = historicalStats.mapNotNull { it?.get(key)?.toDouble() }
+
+        if (historicalValues.isEmpty()) {
+          null
+        } else {
+          // Combine all values and wrap in anonymous objects in one expression
+          val allValues = historicalValues + currentValue.toDouble()
+          val wrappers =
+            allValues.map { v ->
+              object {
+                val value = v
+              }
+            }
+
+          // Call getScores with historical and current
+          val scores = outliers.getScores(wrappers.dropLast(1), wrappers.last())
+
+          // Map directly to the key -> score pair
+          scores["value"]?.let { key to it }
+        }
+      }.toMap()
+  }
+
+  private fun evaluateJobOutliers(scores: Map<String, Scores>): List<OutlierEvaluation> =
+    jobObservabilityRulesService
+      .getJobOutlierRules()
+      .mapNotNull { evaluateRule(scores, rule = it) }
+
+  private fun evaluateStreamOutliers(scores: Map<String, Scores>): List<OutlierEvaluation> =
+    jobObservabilityRulesService
+      .getStreamOutlierRules()
+      .mapNotNull { evaluateRule(scores, rule = it) }
+
+  private fun evaluateRule(
+    scores: Map<String, Scores>,
+    rule: OutlierRule,
+  ): OutlierEvaluation? {
+    val eval = rule.evaluate(scores)
+    if (eval == null) {
+      logger.warn { "Failed to evaluate outlier rule ${rule.name}" }
+      metricClient.count(OssMetricsRegistry.DATA_OBS_OUTLIER_CHECK_ERRORS, value = 1)
+    }
+    return eval
+  }
+
+  /**
+   * Compute derived stats from stream metrics and add them to additionalStats.
+   *
+   * This evaluates all DerivedStatRules, checking if all necessary dimensions are present
+   * before computing each derived stat.
+   *
+   * @param metrics The stream metrics to augment
+   * @return A copy of the metrics with derived stats added to additionalStats
+   */
+  fun computeStreamDerivedStats(metrics: StreamMetrics): StreamMetrics {
+    val derivedRules = jobObservabilityRulesService.getDerivedStreamStatRules()
+    if (derivedRules.isEmpty()) {
+      return metrics
+    }
+
+    // Create a raw scoring context from the current metrics
+    val rawContext = metrics.toRawScoringContext()
+
+    // Compute all derived stats
+    val derivedStats =
+      derivedRules
+        .mapNotNull { rule ->
+          rule.compute(rawContext)?.let { rule.name to it }
+        }.toMap()
+
+    // Return new metrics with derived stats added to additionalStats
+    return metrics.copy(
+      additionalStats = metrics.additionalStats + derivedStats,
+    )
+  }
+
+  /**
+   * Convert StreamMetrics to a raw ScoringContext (before statistical scoring).
+   * This allows DerivedStatRules to evaluate expressions against current metric values.
+   */
+  private fun StreamMetrics.toRawScoringContext(): Map<String, Scores> {
+    val baseContext =
+      mapOf(
+        "bytesLoaded" to Scores(current = bytesLoaded.toDouble(), mean = 0.0, std = 0.0, zScore = 0.0),
+        "recordsLoaded" to Scores(current = recordsLoaded.toDouble(), mean = 0.0, std = 0.0, zScore = 0.0),
+        "recordsRejected" to Scores(current = recordsRejected.toDouble(), mean = 0.0, std = 0.0, zScore = 0.0),
+      )
+
+    // Include existing additionalStats so derived stats can reference them
+    val additionalContext =
+      additionalStats.mapValues { (_, value) ->
+        Scores(current = value.toDouble(), mean = 0.0, std = 0.0, zScore = 0.0)
+      }
+
+    return baseContext + additionalContext
+  }
+}

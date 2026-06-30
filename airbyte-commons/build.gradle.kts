@@ -1,0 +1,51 @@
+import de.undercouch.gradle.tasks.download.Download
+
+plugins {
+  id("io.airbyte.gradle.jvm.lib")
+  id("io.airbyte.gradle.publish")
+  alias(libs.plugins.de.undercouch.download)
+}
+
+dependencies {
+  implementation(libs.bundles.micronaut.annotation)
+
+  implementation(libs.bundles.jackson)
+  implementation(libs.bundles.slf4j)
+  implementation(libs.kotlin.logging)
+  implementation(libs.google.cloud.storage)
+  implementation(libs.airbyte.protocol)
+  implementation(libs.apache.commons.codec)
+
+  // this dependency is an exception to the above rule because it is only used INTERNALLY to the Commons library.
+  implementation(libs.json.path)
+  implementation(libs.json.smart)
+
+  testImplementation(libs.mockk)
+  testImplementation(libs.bundles.junit)
+  testImplementation(libs.assertj.core)
+  testImplementation(libs.junit.pioneer)
+
+  testRuntimeOnly(libs.junit.jupiter.engine)
+  testRuntimeOnly(libs.bundles.logback)
+}
+
+airbyte {
+  spotless {
+    excludes = listOf("src/main/resources/seed/specs_secrets_mask.yaml")
+  }
+}
+
+tasks.register<Download>("downloadSpecSecretMask") {
+  src("https://connectors.airbyte.com/files/registries/v0/specs_secrets_mask.yaml")
+  dest(File(projectDir, "src/main/resources/seed/specs_secrets_mask.yaml"))
+  overwrite(true)
+}
+
+tasks.named<Test>("test") {
+  environment(
+    mapOf(
+      "Z_TESTING_PURPOSES_ONLY_1" to "value-defined",
+      "Z_TESTING_PURPOSES_ONLY_2" to "  ",
+    ),
+  )
+}

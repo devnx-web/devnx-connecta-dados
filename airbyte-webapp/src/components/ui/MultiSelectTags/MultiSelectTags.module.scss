@@ -1,0 +1,21 @@
+@use "scss/colors";
+@use "scss/variables";
+
+.multiSelect {
+  &__button {
+    padding: variables.$spacing-sm;
+    min-height: variables.$form-input-height;
+    height: auto;
+  }
+
+  &__item {
+    background: colors.$grey-100;
+    border-radius: variables.$border-radius-sm;
+  }
+
+  &__itemText {
+    padding-block: variables.$spacing-xs;
+    padding-inline: variables.$spacing-md;
+    cursor: default;
+  }
+}

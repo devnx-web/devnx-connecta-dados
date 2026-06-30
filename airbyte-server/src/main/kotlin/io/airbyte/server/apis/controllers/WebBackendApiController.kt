@@ -1,0 +1,202 @@
+/*
+ * Copyright (c) 2020-2026 Airbyte, Inc., all rights reserved.
+ */
+
+package io.airbyte.server.apis.controllers
+
+import io.airbyte.api.generated.WebBackendApi
+import io.airbyte.api.model.generated.ConnectionIdRequestBody
+import io.airbyte.api.model.generated.ConnectionStateType
+import io.airbyte.api.model.generated.WebBackendCheckUpdatesRead
+import io.airbyte.api.model.generated.WebBackendConnectionCreate
+import io.airbyte.api.model.generated.WebBackendConnectionListRequestBody
+import io.airbyte.api.model.generated.WebBackendConnectionRead
+import io.airbyte.api.model.generated.WebBackendConnectionReadList
+import io.airbyte.api.model.generated.WebBackendConnectionRequestBody
+import io.airbyte.api.model.generated.WebBackendConnectionStatusCounts
+import io.airbyte.api.model.generated.WebBackendConnectionUpdate
+import io.airbyte.api.model.generated.WebBackendCronExpressionDescription
+import io.airbyte.api.model.generated.WebBackendDescribeCronExpressionRequestBody
+import io.airbyte.api.model.generated.WebBackendValidateMappersRequestBody
+import io.airbyte.api.model.generated.WebBackendValidateMappersResponse
+import io.airbyte.api.model.generated.WebBackendWorkspaceState
+import io.airbyte.api.model.generated.WebBackendWorkspaceStateResult
+import io.airbyte.api.model.generated.WebappConfigResponse
+import io.airbyte.api.model.generated.WorkspaceIdRequestBody
+import io.airbyte.commons.annotation.AuditLogging
+import io.airbyte.commons.annotation.AuditLoggingProvider
+import io.airbyte.commons.auth.roles.AuthRoleConstants
+import io.airbyte.commons.server.authorization.RoleResolver
+import io.airbyte.commons.server.handlers.WebBackendCheckUpdatesHandler
+import io.airbyte.commons.server.handlers.WebBackendConnectionsHandler
+import io.airbyte.commons.server.scheduling.AirbyteTaskExecutors
+import io.airbyte.commons.server.support.AuthenticationId
+import io.airbyte.metrics.lib.TracingHelper
+import io.airbyte.micronaut.runtime.AirbyteConfig
+import io.airbyte.micronaut.runtime.AirbyteWebappConfig
+import io.airbyte.server.apis.execute
+import io.airbyte.server.handlers.WebBackendCronExpressionHandler
+import io.airbyte.server.handlers.WebBackendMappersHandler
+import io.micronaut.http.annotation.Body
+import io.micronaut.http.annotation.Controller
+import io.micronaut.http.annotation.Get
+import io.micronaut.http.annotation.Post
+import io.micronaut.scheduling.annotation.ExecuteOn
+import io.micronaut.security.annotation.Secured
+import io.micronaut.security.rules.SecurityRule
+
+@Controller("/api/v1/web_backend")
+@Secured(SecurityRule.IS_AUTHENTICATED)
+open class WebBackendApiController(
+  private val webBackendConnectionsHandler: WebBackendConnectionsHandler,
+  private val webBackendCheckUpdatesHandler: WebBackendCheckUpdatesHandler,
+  private val webBackendCronExpressionHandler: WebBackendCronExpressionHandler,
+  private val webBackendMappersHandler: WebBackendMappersHandler,
+  private val airbyteConfig: AirbyteConfig,
+  private val airbyteWebappConfig: AirbyteWebappConfig,
+  private val roleResolver: RoleResolver,
+) : WebBackendApi {
+  @Post("/state/get_type")
+  @Secured(AuthRoleConstants.WORKSPACE_READER, AuthRoleConstants.ORGANIZATION_READER)
+  @ExecuteOn(AirbyteTaskExecutors.IO)
+  override fun getStateType(
+    @Body connectionIdRequestBody: ConnectionIdRequestBody,
+  ): ConnectionStateType? =
+    execute {
+      TracingHelper.addConnection(connectionIdRequestBody.connectionId)
+      webBackendConnectionsHandler.getStateType(connectionIdRequestBody)
+    }
+
+  @Post("/check_updates")
+  @Secured(AuthRoleConstants.AUTHENTICATED_USER)
+  @ExecuteOn(AirbyteTaskExecutors.IO)
+  override fun webBackendCheckUpdates(): WebBackendCheckUpdatesRead? = execute { webBackendCheckUpdatesHandler.checkUpdates() }
+
+  @Post("/connections/create")
+  @Secured(AuthRoleConstants.WORKSPACE_EDITOR, AuthRoleConstants.ORGANIZATION_EDITOR)
+  @ExecuteOn(AirbyteTaskExecutors.SCHEDULER)
+  @AuditLogging(provider = AuditLoggingProvider.ONLY_ACTOR)
+  override fun webBackendCreateConnection(
+    @Body webBackendConnectionCreate: WebBackendConnectionCreate,
+  ): WebBackendConnectionRead? =
+    execute {
+      TracingHelper.addSourceDestination(
+        webBackendConnectionCreate.sourceId,
+        webBackendConnectionCreate.destinationId,
+      )
+      webBackendConnectionsHandler.webBackendCreateConnection(webBackendConnectionCreate)
+    }
+
+  @Post("/connections/get")
+  @Secured(AuthRoleConstants.WORKSPACE_READER, AuthRoleConstants.ORGANIZATION_READER)
+  @ExecuteOn(AirbyteTaskExecutors.IO)
+  override fun webBackendGetConnection(
+    @Body webBackendConnectionRequestBody: WebBackendConnectionRequestBody,
+  ): WebBackendConnectionRead? =
+    execute {
+      TracingHelper.addConnection(webBackendConnectionRequestBody.connectionId)
+      if (webBackendConnectionRequestBody.withRefreshedCatalog == true) {
+        // only allow refresh catalog if the user is at least a workspace editor or
+        // organization editor for the connection's workspace
+        roleResolver
+          .newRequest()
+          .withCurrentUser()
+          .withRef(AuthenticationId.CONNECTION_ID, webBackendConnectionRequestBody.connectionId.toString())
+          .requireRole(AuthRoleConstants.WORKSPACE_EDITOR)
+      }
+      webBackendConnectionsHandler.webBackendGetConnection(webBackendConnectionRequestBody)
+    }
+
+  @Post("/workspace/state")
+  @Secured(AuthRoleConstants.WORKSPACE_READER, AuthRoleConstants.ORGANIZATION_READER)
+  @ExecuteOn(AirbyteTaskExecutors.IO)
+  override fun webBackendGetWorkspaceState(
+    @Body webBackendWorkspaceState: WebBackendWorkspaceState,
+  ): WebBackendWorkspaceStateResult? =
+    execute {
+      TracingHelper.addWorkspace(webBackendWorkspaceState.workspaceId)
+      webBackendConnectionsHandler.getWorkspaceState(webBackendWorkspaceState)
+    }
+
+  @Post("/connections/list")
+  @Secured(AuthRoleConstants.WORKSPACE_READER, AuthRoleConstants.ORGANIZATION_READER)
+  @ExecuteOn(AirbyteTaskExecutors.IO)
+  override fun webBackendListConnectionsForWorkspace(
+    @Body webBackendConnectionListRequestBody: WebBackendConnectionListRequestBody,
+  ): WebBackendConnectionReadList? =
+    execute {
+      TracingHelper.addWorkspace(webBackendConnectionListRequestBody.workspaceId)
+      webBackendConnectionsHandler.webBackendListConnectionsForWorkspace(
+        webBackendConnectionListRequestBody,
+      )
+    }
+
+  @Post("/connections/status_counts")
+  @Secured(AuthRoleConstants.WORKSPACE_READER, AuthRoleConstants.ORGANIZATION_READER)
+  @ExecuteOn(AirbyteTaskExecutors.IO)
+  override fun webBackendGetConnectionStatusCounts(
+    @Body workspaceIdRequestBody: WorkspaceIdRequestBody,
+  ): WebBackendConnectionStatusCounts? =
+    execute {
+      TracingHelper.addWorkspace(workspaceIdRequestBody.workspaceId)
+      webBackendConnectionsHandler.webBackendGetConnectionStatusCounts(workspaceIdRequestBody)
+    }
+
+  @Post("/connections/update")
+  @Secured(AuthRoleConstants.WORKSPACE_EDITOR, AuthRoleConstants.ORGANIZATION_EDITOR)
+  @ExecuteOn(AirbyteTaskExecutors.IO)
+  @AuditLogging(provider = AuditLoggingProvider.ONLY_ACTOR)
+  override fun webBackendUpdateConnection(
+    @Body webBackendConnectionUpdate: WebBackendConnectionUpdate,
+  ): WebBackendConnectionRead? =
+    execute {
+      TracingHelper.addConnection(webBackendConnectionUpdate.connectionId)
+      webBackendConnectionsHandler.webBackendUpdateConnection(webBackendConnectionUpdate)
+    }
+
+  @Post("/connections/mappers/validate")
+  @Secured(AuthRoleConstants.WORKSPACE_EDITOR, AuthRoleConstants.ORGANIZATION_EDITOR)
+  @ExecuteOn(AirbyteTaskExecutors.IO)
+  override fun webBackendValidateMappers(
+    @Body webBackendValidateMappersRequestBody: WebBackendValidateMappersRequestBody,
+  ): WebBackendValidateMappersResponse? =
+    execute {
+      webBackendMappersHandler.validateMappers(
+        webBackendValidateMappersRequestBody,
+      )
+    }
+
+  @Post("/describe_cron_expression")
+  @Secured(AuthRoleConstants.AUTHENTICATED_USER)
+  @ExecuteOn(AirbyteTaskExecutors.IO)
+  override fun webBackendDescribeCronExpression(
+    @Body body: WebBackendDescribeCronExpressionRequestBody,
+  ): WebBackendCronExpressionDescription? =
+    execute {
+      webBackendCronExpressionHandler.describeCronExpression(
+        body,
+      )
+    }
+
+  @Get("/config")
+  @Secured(SecurityRule.IS_ANONYMOUS)
+  @ExecuteOn(AirbyteTaskExecutors.IO)
+  override fun getWebappConfig(): WebappConfigResponse =
+    WebappConfigResponse().apply {
+      version = airbyteConfig.version
+      edition = airbyteConfig.edition.name.lowercase()
+      datadogApplicationId = airbyteWebappConfig.datadogApplicationId
+      datadogClientToken = airbyteWebappConfig.datadogClientToken
+      datadogEnv = airbyteWebappConfig.datadogEnv
+      datadogService = airbyteWebappConfig.datadogService
+      datadogSite = airbyteWebappConfig.datadogSite
+      hockeystackApiKey = airbyteWebappConfig.hockeystackApiKey
+      launchdarklyKey = airbyteWebappConfig.launchdarklyKey
+      osanoKey = airbyteWebappConfig.osanoKey
+      segmentToken = airbyteWebappConfig.segmentToken
+      sonarApiUrl = airbyteWebappConfig.sonarApiUrl
+      coralAgentsApiUrl = airbyteWebappConfig.coralAgentsApiUrl
+      zendeskKey = airbyteWebappConfig.zendeskKey
+      fullstoryGuidesOrgId = airbyteWebappConfig.fullstoryGuidesOrgId
+    }
+}

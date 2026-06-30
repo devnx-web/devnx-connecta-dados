@@ -1,0 +1,13 @@
+micronaut:
+  security:
+    enabled: true
+    filter:
+      enabled: false
+
+airbyte:
+  workload-launcher:
+    network-policy-introspection: true
+  worker:
+    job:
+      kube:
+        serviceAccount: ${JOB_KUBE_SERVICEACCOUNT:airbyte-admin}

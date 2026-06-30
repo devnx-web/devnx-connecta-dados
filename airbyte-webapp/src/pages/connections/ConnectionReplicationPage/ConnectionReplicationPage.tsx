@@ -1,0 +1,367 @@
+import isBoolean from "lodash/isBoolean";
+import pick from "lodash/pick";
+import React, { useCallback, useEffect } from "react";
+import { UseFormReturn, useFormState } from "react-hook-form";
+import { FormattedMessage, useIntl } from "react-intl";
+import { useLocation } from "react-router-dom";
+import { useUnmount } from "react-use";
+
+import { Card } from "components/ui/Card";
+import { FlexContainer } from "components/ui/Flex";
+import { Form } from "components/ui/forms";
+import { ExternalLink } from "components/ui/Link";
+import { Message } from "components/ui/Message/Message";
+import { ScrollParent } from "components/ui/ScrollParent";
+
+import { FormConnectionFormValues, useInitialFormValues } from "area/connection/components/ConnectionForm/formConfig";
+import { useRefreshSourceSchemaWithConfirmationOnDirty } from "area/connection/components/ConnectionForm/refreshSourceSchemaWithConfirmationOnDirty";
+import { SchemaChangeBackdrop } from "area/connection/components/ConnectionForm/SchemaChangeBackdrop";
+import { SchemaRefreshing } from "area/connection/components/ConnectionForm/SchemaRefreshing";
+import { useReplicationConnectionValidationZodSchema } from "area/connection/components/ConnectionForm/schemas/connectionSchema";
+import { SyncCatalogTable } from "area/connection/components/SyncCatalogTable";
+import { useConnectionEditService } from "area/connection/utils/ConnectionEdit/ConnectionEditService";
+import { useConnectionFormService } from "area/connection/utils/ConnectionForm/ConnectionFormService";
+import { useConfirmCatalogDiff } from "area/connection/utils/useConfirmCatalogDiff";
+import { useSchemaChanges } from "area/connection/utils/useSchemaChanges";
+import {
+  ConnectionValues,
+  HttpError,
+  HttpProblem,
+  useDestinationDefinitionVersion,
+  useGetStateTypeQuery,
+} from "core/api";
+import { PageTrackingCodes, useTrackPage } from "core/services/analytics";
+import { useExperiment } from "core/services/Experiment";
+import { ModalResult, useModalService } from "core/services/Modal";
+import { useNotificationService } from "core/services/Notification";
+import { useFormMode } from "core/services/ui/FormModeContext";
+import { useIsCloudApp } from "core/utils/app";
+import { trackError } from "core/utils/datadog";
+
+import { ChangesReviewModal } from "./ChangesReviewModal";
+import { ClearDataWarningModal } from "./ClearDataWarningModal";
+import styles from "./ConnectionReplicationPage.module.scss";
+import {
+  recommendActionOnConnectionUpdate,
+  analyzeConnectionChanges,
+  determineConnectionUpdateActions,
+  discardFullRefreshChanges,
+} from "./connectionUpdateHelpers";
+import { RecommendRefreshModal } from "./RecommendRefreshModal";
+import { useAnalyticsTrackFunctions } from "./useAnalyticsTrackFunctions";
+
+const SchemaChangeMessage: React.FC = () => {
+  const { isDirty } = useFormState<FormConnectionFormValues>();
+  const refreshWithConfirm = useRefreshSourceSchemaWithConfirmationOnDirty(isDirty);
+  const { refreshSchema } = useConnectionFormService();
+  const { connection, schemaHasBeenRefreshed, schemaRefreshing, connectionUpdating } = useConnectionEditService();
+  const { hasNonBreakingSchemaChange, hasBreakingSchemaChange } = useSchemaChanges(connection.schemaChange);
+  if (schemaHasBeenRefreshed) {
+    return null;
+  }
+  if (hasNonBreakingSchemaChange && !schemaRefreshing) {
+    return (
+      <Message
+        type="info"
+        text={<FormattedMessage id="connection.schemaChange.nonBreaking" />}
+        actionBtnText={<FormattedMessage id="connection.schemaChange.reviewAction" />}
+        actionBtnProps={{ disabled: connectionUpdating }}
+        onAction={refreshSchema}
+        data-testid="schemaChangesDetected"
+      />
+    );
+  }
+  if (hasBreakingSchemaChange && !schemaRefreshing) {
+    return (
+      <Message
+        type="error"
+        text={<FormattedMessage id="connection.schemaChange.breaking" />}
+        actionBtnText={<FormattedMessage id="connection.schemaChange.reviewAction" />}
+        onAction={refreshWithConfirm}
+        data-testid="schemaChangesDetected"
+      />
+    );
+  }
+  return null;
+};
+const relevantConnectionKeys = [
+  "syncCatalog" as const,
+  "namespaceDefinition" as const,
+  "namespaceFormat" as const,
+  "prefix" as const,
+];
+
+export const ConnectionReplicationPage: React.FC = () => {
+  useTrackPage(PageTrackingCodes.CONNECTIONS_ITEM_REPLICATION);
+  const { trackSchemaEdit } = useAnalyticsTrackFunctions();
+  const getStateType = useGetStateTypeQuery();
+
+  const { formatMessage } = useIntl();
+  const { registerNotification, unregisterNotificationById } = useNotificationService();
+  const { openModal } = useModalService();
+
+  const { connection, updateConnection, discardRefreshedSchema } = useConnectionEditService();
+  const { setSubmitError, refreshSchema } = useConnectionFormService();
+  const { mode } = useFormMode();
+  const destinationDefinitionVersion = useDestinationDefinitionVersion(connection.destination.destinationId);
+  const initialValues = useInitialFormValues(connection, mode, destinationDefinitionVersion.supportsFileTransfer);
+
+  const { supportsRefreshes: destinationSupportsRefreshes } = useDestinationDefinitionVersion(
+    connection.destination.destinationId
+  );
+
+  const isUnifiedChangesReviewEnabled = useExperiment("connection.unifiedChangesReview");
+  const isCloudApp = useIsCloudApp();
+
+  type RelevantConnectionValues = Pick<ConnectionValues, (typeof relevantConnectionKeys)[number]>;
+  const zodValidationSchema = useReplicationConnectionValidationZodSchema();
+
+  const saveConnection = useCallback(
+    async (values: Partial<ConnectionValues>, skipReset: boolean) => {
+      await updateConnection({
+        connectionId: connection.connectionId,
+        ...(pick(values, relevantConnectionKeys) as RelevantConnectionValues),
+        // required to update the catalog if a schema change w/transforms exists
+        sourceCatalogId: connection.catalogId,
+        skipReset,
+      });
+    },
+    [connection, updateConnection]
+  );
+
+  const onFormSubmit = useCallback(
+    async (values: RelevantConnectionValues) => {
+      setSubmitError(null);
+
+      /**
+       * - determine whether to recommend a reset / refresh
+       * - if yes, give the user the option to opt out
+       * - save the connection (unless the user cancels the action via the recommendation modal)
+       */
+
+      try {
+        if (isUnifiedChangesReviewEnabled) {
+          // ===== NEW FLOW: Unified Changes Review =====
+          const changes = analyzeConnectionChanges({
+            formSyncCatalog: values.syncCatalog,
+            storedSyncCatalog: connection.syncCatalog,
+            scheduleData: connection.scheduleData,
+            scheduleType: connection.scheduleType,
+            destinationSupportsRefresh: destinationSupportsRefreshes,
+            isCloudApp,
+          });
+
+          // If no changes detected, save directly
+          if (Object.keys(changes).length === 0) {
+            await saveConnection(values as Partial<ConnectionValues>, true /* skipReset */);
+            trackSchemaEdit(connection);
+            return Promise.resolve();
+          }
+
+          // Show unified modal with all warnings
+          const result = await openModal<Record<string, "accept" | "reject">>({
+            title: formatMessage({ id: "connection.reviewChanges.title" }),
+            size: "lg",
+            content: ({ onCancel, onComplete }) => (
+              <ChangesReviewModal changes={changes} onCancel={onCancel} onContinue={onComplete} />
+            ),
+          });
+
+          // If user cancels, reject and don't save
+          if (result.type !== "completed") {
+            return Promise.reject(new Error("MODAL_CANCELLED"));
+          }
+
+          const decisions = result.reason;
+
+          // Determine actions based on decisions
+          const actions = determineConnectionUpdateActions(decisions, changes);
+
+          // If user rejected fullRefreshHighFrequency, revert those streams
+          let finalValues = values;
+          if (actions.fullRefreshStreamsToRevert) {
+            finalValues = discardFullRefreshChanges(
+              values as ConnectionValues,
+              actions.fullRefreshStreamsToRevert
+            ) as RelevantConnectionValues;
+          }
+
+          // Save with correct skipReset flag
+          await saveConnection(finalValues, actions.skipReset);
+
+          // Track schema edit
+          trackSchemaEdit(connection);
+
+          return Promise.resolve();
+        }
+        // ===== OLD FLOW: Separate Modals (Backward Compatible) =====
+        const { shouldTrackAction, shouldRecommendRefresh } = recommendActionOnConnectionUpdate({
+          catalogDiff: connection.catalogDiff,
+          formSyncCatalog: values.syncCatalog,
+          storedSyncCatalog: connection.syncCatalog,
+        });
+
+        // handler for modal -- saves connection w/ modal result taken into account
+        async function handleModalResult(
+          result: ModalResult<boolean>,
+          values: RelevantConnectionValues,
+          saveConnection: (values: RelevantConnectionValues, skipReset: boolean) => Promise<void>
+        ) {
+          if (result.type === "completed" && isBoolean(result.reason)) {
+            // Save the connection taking into account the correct skipReset value from the dialog choice.
+            return await saveConnection(values, !result.reason /* skipReset */);
+          }
+          // We don't want to set saved to true or schema has been refreshed to false.
+          return Promise.reject();
+        }
+
+        if (shouldRecommendRefresh) {
+          // if the destination doesn't support refreshes, we need to clear data instead
+          if (!destinationSupportsRefreshes) {
+            // recommend clearing data
+            const stateType = await getStateType(connection.connectionId);
+            const result = await openModal<boolean>({
+              title: formatMessage({ id: "connection.clearDataRecommended" }),
+              size: "md",
+              content: (props) => <ClearDataWarningModal {...props} stateType={stateType} />,
+            });
+            await handleModalResult(result, values, saveConnection);
+          } else {
+            // recommend refreshing data
+            const result = await openModal<boolean>({
+              title: formatMessage({ id: "connection.refreshDataRecommended" }),
+              size: "md",
+              content: ({ onCancel, onComplete }) => (
+                <RecommendRefreshModal onCancel={onCancel} onComplete={onComplete} />
+              ),
+            });
+            await handleModalResult(result, values, saveConnection);
+          }
+        } else {
+          // do not recommend a refresh or clearing data, just save
+          await saveConnection(values, true /* skipReset */);
+        }
+
+        /* analytics */
+        if (shouldTrackAction) {
+          trackSchemaEdit(connection);
+        }
+
+        return Promise.resolve();
+      } catch (e) {
+        if (!(e instanceof HttpError && HttpProblem.isType(e, "error:connection-conflicting-destination-stream"))) {
+          console.log("setting submit error");
+          setSubmitError(e);
+        }
+
+        throw e; // we _do_ need this to throw in order for isSubmitSuccessful to be false
+      }
+    },
+    [
+      setSubmitError,
+      connection,
+      destinationSupportsRefreshes,
+      getStateType,
+      openModal,
+      formatMessage,
+      saveConnection,
+      trackSchemaEdit,
+      isUnifiedChangesReviewEnabled,
+      isCloudApp,
+    ]
+  );
+
+  useConfirmCatalogDiff();
+
+  useUnmount(() => {
+    discardRefreshedSchema();
+  });
+  const { state } = useLocation();
+  useEffect(() => {
+    if (typeof state === "object" && state && "triggerRefreshSchema" in state && state.triggerRefreshSchema) {
+      refreshSchema();
+    }
+  }, [refreshSchema, state]);
+
+  const onSuccess = () => {
+    registerNotification({
+      id: "connection_settings_change_success",
+      text: formatMessage({ id: "form.changesSaved" }),
+      type: "success",
+    });
+  };
+
+  const onError = (
+    error: Error,
+    _values: RelevantConnectionValues,
+    methods: UseFormReturn<RelevantConnectionValues>
+  ) => {
+    // If user cancelled the modal, don't show error toast
+    if (error.message === "MODAL_CANCELLED") {
+      return;
+    }
+    trackError(error, { connectionName: connection.name });
+
+    if (error instanceof HttpError && HttpProblem.isType(error, "error:connection-conflicting-destination-stream")) {
+      registerNotification({
+        id: "connection.conflictingDestinationStream",
+        text: formatMessage(
+          {
+            id: "connectionForm.conflictingDestinationStream",
+          },
+          {
+            stream: error.response?.data?.streams?.[0]?.streamName,
+            moreCount:
+              (error.response?.data?.streams?.length ?? 0) > 1 ? (error.response?.data?.streams?.length ?? 1) - 1 : 0,
+            lnk: (...lnk: React.ReactNode[]) => (
+              <ExternalLink href={error.response.documentationUrl ?? ""}>{lnk}</ExternalLink>
+            ),
+          }
+        ),
+        actionBtnText: formatMessage({ id: "connectionForm.conflictingDestinationStream.action" }),
+        onAction: async () => {
+          const randomPrefix = `${Math.random().toString(36).substring(2, 8)}_`;
+          methods.setValue("prefix", randomPrefix);
+          unregisterNotificationById("connection.conflictingDestinationStream");
+          await methods.handleSubmit(onFormSubmit)();
+          onSuccess();
+        },
+        type: "error",
+      });
+      return;
+    }
+
+    registerNotification({
+      id: "connection_settings_change_error",
+      text: formatMessage({ id: "connection.updateFailed" }),
+      type: "error",
+    });
+  };
+
+  return (
+    <div className={styles.container}>
+      <ScrollParent>
+        <Form<RelevantConnectionValues>
+          defaultValues={initialValues}
+          reinitializeDefaultValues
+          zodSchema={zodValidationSchema}
+          onSubmit={onFormSubmit}
+          trackDirtyChanges
+          onError={onError}
+          onSuccess={onSuccess}
+        >
+          <FlexContainer direction="column">
+            <SchemaChangeMessage />
+            <SchemaChangeBackdrop>
+              <SchemaRefreshing>
+                <Card title={formatMessage({ id: "connection.schema" })} noPadding className={styles.syncCatalogCard}>
+                  <SyncCatalogTable />
+                </Card>
+              </SchemaRefreshing>
+            </SchemaChangeBackdrop>
+          </FlexContainer>
+        </Form>
+      </ScrollParent>
+    </div>
+  );
+};

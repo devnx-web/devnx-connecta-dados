@@ -1,0 +1,214 @@
+/*
+ * Copyright (c) 2020-2026 Airbyte, Inc., all rights reserved.
+ */
+
+package io.airbyte.workers.helpers
+
+import io.airbyte.api.client.AirbyteApiClient
+import io.airbyte.api.client.generated.JobRetryStatesApi
+import io.airbyte.api.client.generated.WorkspaceApi
+import io.airbyte.api.client.model.generated.JobIdRequestBody
+import io.airbyte.api.client.model.generated.RetryStateRead
+import io.airbyte.featureflag.CompleteFailureBackoffBase
+import io.airbyte.featureflag.CompleteFailureBackoffMaxInterval
+import io.airbyte.featureflag.CompleteFailureBackoffMinInterval
+import io.airbyte.featureflag.Context
+import io.airbyte.featureflag.FeatureFlagClient
+import io.airbyte.featureflag.SuccessiveCompleteFailureLimit
+import io.airbyte.featureflag.SuccessivePartialFailureLimit
+import io.airbyte.featureflag.TestClient
+import io.airbyte.featureflag.TotalCompleteFailureLimit
+import io.airbyte.featureflag.TotalPartialFailureLimit
+import io.airbyte.featureflag.Workspace
+import io.airbyte.workers.runtime.AirbyteWorkerRetryConfig
+import io.micronaut.http.HttpStatus
+import io.mockk.every
+import io.mockk.mockk
+import org.junit.jupiter.api.Assertions
+import org.junit.jupiter.api.BeforeEach
+import org.junit.jupiter.api.Test
+import org.openapitools.client.infrastructure.ClientException
+import java.time.Duration
+import java.util.UUID
+import java.util.concurrent.ThreadLocalRandom
+
+internal class RetryStateClientTest {
+  private lateinit var mAirbyteApiClient: AirbyteApiClient
+  private lateinit var mJobRetryStatesApi: JobRetryStatesApi
+  private lateinit var mWorkspaceApi: WorkspaceApi
+  private lateinit var mFeatureFlagClient: FeatureFlagClient
+  private lateinit var airbyteWorkerRetryConfig: AirbyteWorkerRetryConfig
+
+  @BeforeEach
+  fun setup() {
+    mAirbyteApiClient = mockk()
+    mJobRetryStatesApi = mockk(relaxed = true)
+    mWorkspaceApi = mockk(relaxed = true)
+    mFeatureFlagClient = mockk<TestClient>(relaxed = true)
+    every { mAirbyteApiClient.jobRetryStatesApi } returns mJobRetryStatesApi
+    every { mAirbyteApiClient.workspaceApi } returns mWorkspaceApi
+    airbyteWorkerRetryConfig =
+      AirbyteWorkerRetryConfig(
+        completeFailures =
+          AirbyteWorkerRetryConfig.AirbyteWorkerCompleteFailuresRetryConfig(
+            maxSuccessive = Fixtures.successiveCompleteFailureLimit,
+            maxTotal = Fixtures.totalCompleteFailureLimit,
+            backoff =
+              AirbyteWorkerRetryConfig
+                .AirbyteWorkerCompleteFailuresRetryConfig
+                .AirbyteWorkerCompleteFailuresBackoffRetryConfig(
+                  minIntervalS = Fixtures.minInterval,
+                  maxIntervalS = Fixtures.maxInterval,
+                  base = Fixtures.base,
+                ),
+          ),
+        partialFailures =
+          AirbyteWorkerRetryConfig.AirbyteWorkerPartialFailuresRetryConfig(
+            maxSuccessive = Fixtures.successivePartialFailureLimit,
+            maxTotal = Fixtures.totalPartialFailureLimit,
+          ),
+      )
+  }
+
+  @Test
+  fun hydratesBackoffAndLimitsFromConstructor() {
+    // Mock feature flag client to return constructor values (i.e., don't override them)
+    every { mFeatureFlagClient.intVariation(SuccessiveCompleteFailureLimit, any()) } returns Fixtures.successiveCompleteFailureLimit
+    every { mFeatureFlagClient.intVariation(TotalCompleteFailureLimit, any()) } returns Fixtures.totalCompleteFailureLimit
+    every { mFeatureFlagClient.intVariation(SuccessivePartialFailureLimit, any()) } returns Fixtures.successivePartialFailureLimit
+    every { mFeatureFlagClient.intVariation(TotalPartialFailureLimit, any()) } returns Fixtures.totalPartialFailureLimit
+    every { mFeatureFlagClient.intVariation(CompleteFailureBackoffMinInterval, any()) } returns Fixtures.minInterval
+    every { mFeatureFlagClient.intVariation(CompleteFailureBackoffMaxInterval, any()) } returns Fixtures.maxInterval
+    every { mFeatureFlagClient.intVariation(CompleteFailureBackoffBase, any()) } returns Fixtures.base
+
+    val client = RetryStateClient(mAirbyteApiClient, mFeatureFlagClient, airbyteWorkerRetryConfig)
+
+    val manager = client.hydrateRetryState(Fixtures.jobId, Fixtures.workspaceId)
+
+    Assertions.assertEquals(Fixtures.successiveCompleteFailureLimit, manager.successiveCompleteFailureLimit)
+    Assertions.assertEquals(Fixtures.totalCompleteFailureLimit, manager.totalCompleteFailureLimit)
+    Assertions.assertEquals(Fixtures.successivePartialFailureLimit, manager.successivePartialFailureLimit)
+    Assertions.assertEquals(Fixtures.totalPartialFailureLimit, manager.totalPartialFailureLimit)
+
+    val backoffPolicy = manager.completeFailureBackoffPolicy
+    Assertions.assertEquals(Duration.ofSeconds(Fixtures.minInterval.toLong()), backoffPolicy!!.minInterval)
+    Assertions.assertEquals(Duration.ofSeconds(Fixtures.maxInterval.toLong()), backoffPolicy.maxInterval)
+    Assertions.assertEquals(Fixtures.base.toLong(), backoffPolicy.base)
+  }
+
+  @Test
+  fun featureFlagsOverrideValues() {
+    val client = RetryStateClient(mAirbyteApiClient, mFeatureFlagClient, airbyteWorkerRetryConfig)
+
+    every { mFeatureFlagClient.intVariation(SuccessiveCompleteFailureLimit, any()) } returns Fixtures.successiveCompleteFailureLimit
+    every { mFeatureFlagClient.intVariation(TotalCompleteFailureLimit, any()) } returns Fixtures.totalCompleteFailureLimit
+    every { mFeatureFlagClient.intVariation(SuccessivePartialFailureLimit, any()) } returns Fixtures.successivePartialFailureLimit
+    every { mFeatureFlagClient.intVariation(TotalPartialFailureLimit, any()) } returns Fixtures.totalPartialFailureLimit
+    every { mFeatureFlagClient.intVariation(CompleteFailureBackoffMinInterval, any()) } returns 0
+    every { mFeatureFlagClient.intVariation(CompleteFailureBackoffMaxInterval, any()) } returns Fixtures.maxInterval
+    every { mFeatureFlagClient.intVariation(CompleteFailureBackoffBase, any()) } returns Fixtures.base
+
+    val manager = client.hydrateRetryState(Fixtures.jobId, Fixtures.workspaceId)
+
+    Assertions.assertEquals(Fixtures.successiveCompleteFailureLimit, manager.successiveCompleteFailureLimit)
+    Assertions.assertEquals(Fixtures.totalCompleteFailureLimit, manager.totalCompleteFailureLimit)
+    Assertions.assertEquals(Fixtures.successivePartialFailureLimit, manager.successivePartialFailureLimit)
+    Assertions.assertEquals(Fixtures.totalPartialFailureLimit, manager.totalPartialFailureLimit)
+
+    val backoffPolicy = manager.completeFailureBackoffPolicy
+    Assertions.assertEquals(Duration.ZERO, backoffPolicy!!.minInterval)
+    Assertions.assertEquals(Duration.ofSeconds(Fixtures.maxInterval.toLong()), backoffPolicy.maxInterval)
+    Assertions.assertEquals(Fixtures.base.toLong(), backoffPolicy.base)
+    Assertions.assertEquals(Duration.ZERO, backoffPolicy.getBackoff(0))
+    Assertions.assertEquals(Duration.ZERO, backoffPolicy.getBackoff(1))
+    Assertions.assertEquals(Duration.ZERO, backoffPolicy.getBackoff(2))
+    Assertions.assertEquals(Duration.ZERO, backoffPolicy.getBackoff(3))
+  }
+
+  @Test
+  fun hydratesFailureCountsFromApiIfPresent() {
+    val retryStateRead =
+      RetryStateRead(
+        UUID.randomUUID(),
+        UUID.randomUUID(),
+        Fixtures.jobId,
+        Fixtures.successiveCompleteFailures,
+        Fixtures.totalCompleteFailures,
+        Fixtures.successivePartialFailures,
+        Fixtures.totalPartialFailures,
+      )
+
+    every { mJobRetryStatesApi.get(any<JobIdRequestBody>()) } returns retryStateRead
+
+    val client =
+      RetryStateClient(
+        mAirbyteApiClient,
+        mFeatureFlagClient,
+        airbyteWorkerRetryConfig,
+      )
+
+    val manager = client.hydrateRetryState(Fixtures.jobId, Fixtures.workspaceId)
+
+    Assertions.assertEquals(Fixtures.totalCompleteFailures, manager.totalCompleteFailures)
+    Assertions.assertEquals(Fixtures.totalPartialFailures, manager.totalPartialFailures)
+    Assertions.assertEquals(Fixtures.successiveCompleteFailures, manager.successiveCompleteFailures)
+    Assertions.assertEquals(Fixtures.successivePartialFailures, manager.successivePartialFailures)
+  }
+
+  @Test
+  fun initializesFailureCountsFreshWhenApiReturnsNothing() {
+    every { mJobRetryStatesApi.get(any<JobIdRequestBody>()) } throws ClientException("Not Found.", HttpStatus.NOT_FOUND.code, null)
+
+    val client =
+      RetryStateClient(
+        mAirbyteApiClient,
+        mFeatureFlagClient,
+        airbyteWorkerRetryConfig,
+      )
+
+    val manager = client.hydrateRetryState(Fixtures.jobId, Fixtures.workspaceId)
+
+    Assertions.assertEquals(0, manager.totalCompleteFailures)
+    Assertions.assertEquals(0, manager.totalPartialFailures)
+    Assertions.assertEquals(0, manager.successiveCompleteFailures)
+    Assertions.assertEquals(0, manager.successivePartialFailures)
+  }
+
+  @Test
+  fun initializesFailureCountsFreshWhenJobIdNull() {
+    val client =
+      RetryStateClient(
+        mAirbyteApiClient,
+        mFeatureFlagClient,
+        airbyteWorkerRetryConfig,
+      )
+
+    val manager = client.hydrateRetryState(null, Fixtures.workspaceId)
+
+    Assertions.assertEquals(0, manager.totalCompleteFailures)
+    Assertions.assertEquals(0, manager.totalPartialFailures)
+    Assertions.assertEquals(0, manager.successiveCompleteFailures)
+    Assertions.assertEquals(0, manager.successivePartialFailures)
+  }
+
+  internal object Fixtures {
+    var jobId: Long = ThreadLocalRandom.current().nextLong()
+    var workspaceId: UUID = UUID.randomUUID()
+
+    var successiveCompleteFailureLimit: Int = ThreadLocalRandom.current().nextInt()
+    var totalCompleteFailureLimit: Int = ThreadLocalRandom.current().nextInt()
+    var successivePartialFailureLimit: Int = ThreadLocalRandom.current().nextInt()
+    var totalPartialFailureLimit: Int = ThreadLocalRandom.current().nextInt()
+
+    var totalCompleteFailures: Int = ThreadLocalRandom.current().nextInt()
+    var totalPartialFailures: Int = ThreadLocalRandom.current().nextInt()
+    var successiveCompleteFailures: Int = ThreadLocalRandom.current().nextInt()
+    var successivePartialFailures: Int = ThreadLocalRandom.current().nextInt()
+
+    var minInterval: Int = 10
+    var maxInterval: Int = 1000
+    var base: Int = 2
+
+    val testContext: Context = Workspace(workspaceId)
+  }
+}

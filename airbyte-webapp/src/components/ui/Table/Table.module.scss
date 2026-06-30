@@ -1,0 +1,143 @@
+@use "scss/colors";
+@use "scss/variables";
+@use "scss/z-indices";
+
+$border-radius: variables.$border-radius-sm;
+
+// ------- <table/> --------
+.table {
+  border-spacing: 0;
+  width: 100%;
+  max-width: 100%;
+  border-radius: $border-radius;
+
+  // create a new stacking context so that thead--sticky doesn't show over higher z-index elements like filter dropdowns
+  will-change: opacity;
+
+  &--default {
+    border: variables.$border-thin solid colors.$border-color;
+  }
+
+  &--empty {
+    height: 100%;
+  }
+
+  .viewMoreButton {
+    color: colors.$blue;
+    background-color: colors.$foreground;
+    border: none;
+    cursor: pointer;
+    padding: variables.$spacing-md variables.$spacing-lg;
+    font-size: variables.$font-size-sm;
+    line-height: 1.2;
+    font-weight: 400;
+    border-radius: $border-radius;
+  }
+}
+
+.thead--sticky {
+  position: sticky;
+  top: 0;
+  z-index: z-indices.$tableStickyHeader;
+}
+
+// --------- <th/> ---------
+.th {
+  color: colors.$grey-500;
+  text-transform: uppercase;
+  border-bottom: none;
+  text-align: left;
+  font-size: 10px;
+  line-height: 12px;
+  height: variables.$table-header-height;
+  font-weight: 600;
+  width: auto;
+  padding: variables.$spacing-md variables.$spacing-lg;
+  white-space: nowrap;
+
+  &--sorted {
+    color: colors.$blue;
+  }
+
+  &--default {
+    background-color: colors.$grey-30;
+  }
+
+  &--light {
+    background-color: colors.$grey-50;
+    color: colors.$grey;
+    text-transform: capitalize;
+    font-size: 11px;
+    font-weight: 400;
+  }
+
+  &--white {
+    background-color: colors.$foreground;
+  }
+
+  &--inBlock {
+    text-transform: none;
+    background-color: colors.$foreground;
+    font-size: variables.$font-size-sm;
+    font-weight: normal;
+    border-bottom: variables.$border-thin solid colors.$grey-50;
+  }
+
+  &:first-child {
+    border-radius: $border-radius 0 0;
+  }
+
+  &:last-child {
+    padding-left: variables.$spacing-lg;
+    border-radius: 0 $border-radius 0 0;
+  }
+
+  > button {
+    padding: 0;
+  }
+}
+
+// --------- <tr/> ---------
+.tr {
+  background-color: colors.$foreground;
+  cursor: auto;
+
+  &:hover {
+    background-color: colors.$grey-50;
+  }
+
+  &.emptyPlaceholder {
+    &:hover {
+      background-color: colors.$foreground;
+    }
+  }
+
+  &:last-child > td:first-child {
+    border-bottom-left-radius: $border-radius;
+  }
+
+  &:last-child > td:last-child {
+    border-bottom-right-radius: $border-radius;
+  }
+}
+
+// --------- <td/> ---------
+
+.td {
+  padding: variables.$spacing-md variables.$spacing-lg;
+  font-size: variables.$font-size-sm;
+  line-height: 1.2;
+  font-weight: normal;
+  color: colors.$dark-blue;
+  word-wrap: break-word;
+  border-bottom: variables.$border-thin solid colors.$grey-50;
+  width: auto;
+
+  &--responsive {
+    max-width: 0;
+  }
+
+  &--noPadding {
+    padding: 0;
+  }
+}

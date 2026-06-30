@@ -1,0 +1,46 @@
+micronaut:
+  server:
+    port: -1 # Random port for tests
+
+airbyte:
+  edition: COMMUNITY
+  version: 0.4128173.0
+  acceptance:
+    test:
+      enabled: false
+  control:
+    plane:
+      auth-endpoint: ""
+  data:
+    plane:
+      service-account:
+        credentials-path: ""
+        email: ""
+  internal:
+    host: airbyte-server-svc:8001
+  worker:
+  cloud:
+    storage:
+      type: ${STORAGE_TYPE:GCS}
+      bucket:
+        log: ${STORAGE_BUCKET_LOG:log}
+        state: ${STORAGE_BUCKET_STATE:state}
+        workload-output: ${STORAGE_BUCKET_WORKLOAD_OUTPUT:workload-output}
+        activity-payload: ${STORAGE_BUCKET_ACTIVITY_PAYLOAD:activity-payload}
+        audit-logging: ${STORAGE_BUCKET_AUDIT_LOGGING}
+      gcs:
+        application-credentials: ${GOOGLE_APPLICATION_CREDENTIALS:not-blank}
+      minio:
+        access-key: ${AWS_ACCESS_KEY_ID:}
+        endpoint: ${MINIO_ENDPOINT:}
+        secret-access-key: ${AWS_SECRET_ACCESS_KEY:}
+      s3:
+        access-key: ${AWS_ACCESS_KEY_ID:}
+        region: ${AWS_DEFAULT_REGION:}
+        secret-access-key: ${AWS_SECRET_ACCESS_KEY:}
+  connector:
+    config-dir: src/test/resources/files
+
+endpoints:
+  all:
+    port: -1 # Random port for tests

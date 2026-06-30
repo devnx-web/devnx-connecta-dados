@@ -1,0 +1,12 @@
+airbyte:
+  connector:
+    config-dir: "/test-config-dir"
+    specific-resource-defaults-enabled: true
+    source:
+      credentials:
+        aws:
+          assumed-role:
+            access-key: test-access-key
+            secret-key: test-secret-key
+            secret-name: test-secret-name
+    staging-dir: "/staging-dir"

@@ -1,0 +1,171 @@
+micronaut:
+  application:
+    name: airbyte-container-orchestrator
+  caches:
+    # used by the analytics tracking client to cache calls to resolve the deployment and identity (workspace) for
+    # track events
+    analytics-tracking-deployments:
+      charset: "UTF-8"
+      expire-after-access: 10m
+    analytics-tracking-identity:
+      charset: "UTF-8"
+      expire-after-access: 10m
+  server:
+    port: 9000 # If this value is modified, update the SERVER_PORT constant in OrchestratorConstants.kt
+  executors:
+    control-message:
+      type: fixed
+      n-threads: ${CONTROL_MESSAGE_EXECUTOR_THREADS:1}
+    stream-status:
+      type: fixed
+      n-threads: ${STREAM_STATUS_EXECUTOR_THREADS:1}
+  metrics:
+    enabled: ${MICROMETER_METRICS_ENABLED:false}
+    export:
+      otlp:
+        enabled: ${MICROMETER_METRICS_OTLP_ENABLED:false}
+        step: ${MICROMETER_METRICS_STEP:PT30S}
+        url: ${OTEL_COLLECTOR_ENDPOINT:`http://localhost:4318/v1/metrics`}
+      statsd:
+        enabled: ${MICROMETER_METRICS_STATSD_ENABLED:false}
+        flavor: ${MICROMETER_METRICS_STATSD_FLAVOR:datadog}
+        step: ${MICROMETER_METRICS_STEP:PT30S}
+        host: ${STATSD_HOST:localhost}
+        port: ${STATSD_PORT:8125}
+  security:
+    enabled: false
+airbyte:
+  airbyte-url: ${AIRBYTE_URL:}
+  license-key: ${AIRBYTE_LICENSE_KEY:empty}
+  container.orchestrator:
+    platform-mode: ${PLATFORM_MODE:ORCHESTRATOR}
+  context:
+    attempt-id: ${ATTEMPT_ID:0}
+    connection-id: ${CONNECTION_ID:}
+    job-id: ${JOB_ID:0}
+    workload-id: ${WORKLOAD_ID:}
+    workspace-id: ${WORKSPACE_ID:}
+  edition: ${AIRBYTE_EDITION:COMMUNITY}
+  version: ${AIRBYTE_VERSION:dev}
+  acceptance:
+    test:
+      enabled: ${ACCEPTANCE_TEST_ENABLED:false}
+  cloud:
+    pubsub:
+      enabled: ${PUB_SUB_ENABLED:false}
+      topic: ${PUB_SUB_TOPIC_NAME:}
+      request-bytes-threshold: ${PUB_SUB_REQUEST_BYTES_THRESHOLD:5000}
+      message-count-batch-size: ${PUB_SUB_MESSAGE_COUNT_BATCH_SIZE:50}
+      publish-delay-threshold-ms: ${PUB_SUB_PUBLISH_DELAY_THRESHOLD_MS:100}
+      error-reporting:
+        sentry:
+          dsn: ${JOB_ERROR_REPORTING_SENTRY_DSN:}
+        strategy: ${JOB_ERROR_REPORTING_STRATEGY:LOGGING}
+    storage:
+      type: ${STORAGE_TYPE}
+      bucket:
+        log: ${STORAGE_BUCKET_LOG}
+        state: ${STORAGE_BUCKET_STATE}
+        workload-output: ${STORAGE_BUCKET_WORKLOAD_OUTPUT}
+        activity-payload: ${STORAGE_BUCKET_ACTIVITY_PAYLOAD}
+        audit-logging: ${STORAGE_BUCKET_AUDIT_LOGGING}
+      azure:
+        connection-string: ${AZURE_STORAGE_CONNECTION_STRING:}
+      gcs:
+        application-credentials: ${GOOGLE_APPLICATION_CREDENTIALS:}
+      minio:
+        access-key: ${AWS_ACCESS_KEY_ID:}
+        endpoint: ${MINIO_ENDPOINT:}
+        secret-access-key: ${AWS_SECRET_ACCESS_KEY:}
+      s3:
+        access-key: ${AWS_ACCESS_KEY_ID:}
+        region: ${AWS_DEFAULT_REGION:}
+        secret-access-key: ${AWS_SECRET_ACCESS_KEY:}
+  connector:
+    config-dir: ${AIRBYTE_CONFIG_DIR:/config}
+    staging-dir: ${AIRBYTE_STAGING_DIRECTORY:}
+  control:
+    plane:
+      auth-endpoint: ${CONTROL_PLANE_AUTH_ENDPOINT:}
+  data:
+    plane:
+      service-account:
+        credentials-path: ${DATA_PLANE_SERVICE_ACCOUNT_CREDENTIALS_PATH:}
+        email: ${DATA_PLANE_SERVICE_ACCOUNT_EMAIL:}
+  feature-flag:
+    client: ${FEATURE_FLAG_CLIENT:CONFIGFILE}
+    path: ${FEATURE_FLAG_PATH:/flags}
+    api-key: ${LAUNCHDARKLY_KEY:}
+    base-url: ${FEATURE_FLAG_BASEURL:}
+  internal-api:
+    base-path: ${INTERNAL_API_HOST}/api
+    connect-timeout-seconds: ${AIRBYTE_API_CONNECT_TIMEOUT_SECONDS:30}
+    read-timeout-seconds: ${AIRBYTE_API_READ_TIMEOUT_SECONDS:600}
+    retries:
+      delay-seconds: ${AIRBYTE_API_RETRY_DELAY_SECONDS:2}
+      max: ${AIRBYTE_API_MAX_RETRIES:5}
+    auth:
+      type: DATAPLANE_ACCESS_TOKEN
+      token-endpoint: ${CONTROL_PLANE_TOKEN_ENDPOINT}
+      client-id: ${DATAPLANE_CLIENT_ID}
+      client-secret: ${DATAPLANE_CLIENT_SECRET}
+  tracking:
+    strategy: ${TRACKING_STRATEGY:LOGGING}
+    write-key: ${SEGMENT_WRITE_KEY:}
+  use-file-transfer: ${USE_FILE_TRANSFER:false}
+  worker:
+    replication:
+      persistence-flush-period-sec: ${REPLICATION_FLUSH_PERIOD_SECONDS:10}
+  workload-api:
+    base-path: ${WORKLOAD_API_HOST:}
+    connect-timeout-seconds: ${WORKLOAD_API_CONNECT_TIMEOUT_SECONDS:30}
+    heartbeat:
+      interval-seconds: ${WORKLOAD_API_HEARTBEAT_INTERVAL_SECONDS:10}
+      timeout-seconds: ${WORKLOAD_API_HEARTBEAT_TIMEOUT_SECONDS:600}
+    read-timeout-seconds: ${WORKLOAD_API_READ_TIMEOUT_SECONDS:300}
+    retries:
+      delay-seconds: ${WORKLOAD_API_RETRY_DELAY_SECONDS:2}
+      max: ${WORKLOAD_API_MAX_RETRIES:5}
+  workspace-root: ${WORKSPACE_ROOT}
+
+endpoints:
+  all:
+    port: 8085
+  beans:
+    enabled: true
+    sensitive: false
+  caches:
+    enabled: true
+    sensitive: false
+  env:
+    enabled: true
+    sensitive: false
+  health:
+    enabled: true
+    sensitive: false
+  info:
+    enabled: true
+    sensitive: true
+  loggers:
+    enabled: true
+    sensitive: true
+  refresh:
+    enabled: false
+    sensitive: true
+  routes:
+    enabled: true
+    sensitive: false
+  threaddump:
+    enabled: true
+    sensitive: true
+
+logger:
+  levels:
+    com.zaxxer.hikari: ERROR
+    com.zaxxer.hikari.pool: ERROR
+    io.grpc: INFO
+    io.fabric8.kubernetes.client: INFO
+    io.netty: INFO
+    io.temporal: INFO
+#   Uncomment to help resolve issues with conditional beans
+#      io.micronaut.context.condition: DEBUG

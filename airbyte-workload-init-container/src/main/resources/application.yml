@@ -1,0 +1,93 @@
+micronaut:
+  application:
+    name: airbyte-workload-init-container
+  server:
+    enable: false
+  metrics:
+    enabled: ${MICROMETER_METRICS_ENABLED:false}
+    export:
+      otlp:
+        enabled: ${MICROMETER_METRICS_OTLP_ENABLED:false}
+        step: ${MICROMETER_METRICS_STEP:PT30S}
+        url: ${OTEL_COLLECTOR_ENDPOINT:`http://localhost:4318/v1/metrics`}
+      statsd:
+        enabled: ${MICROMETER_METRICS_STATSD_ENABLED:false}
+        flavor: ${MICROMETER_METRICS_STATSD_FLAVOR:datadog}
+        step: ${MICROMETER_METRICS_STEP:PT30S}
+        host: ${STATSD_HOST:localhost}
+        port: ${STATSD_PORT:8125}
+airbyte:
+  license-key: ${AIRBYTE_LICENSE_KEY:empty}
+  container.orchestrator:
+    platform-mode: ${PLATFORM_MODE:ORCHESTRATOR}
+  context:
+    workload-id: ${WORKLOAD_ID:}
+  control.plane:
+    auth-endpoint: ${CONTROL_PLANE_AUTH_ENDPOINT}
+  data-plane:
+    service-account:
+      credentials-path: ${DATA_PLANE_SERVICE_ACCOUNT_CREDENTIALS_PATH:}
+      email: ${DATA_PLANE_SERVICE_ACCOUNT_EMAIL:}
+  edition: ${AIRBYTE_EDITION:COMMUNITY}
+  init:
+    operation: ${OPERATION_TYPE:}
+  internal-api:
+    base-path: ${INTERNAL_API_HOST}/api
+    connect-timeout-seconds: ${AIRBYTE_API_CONNECT_TIMEOUT_SECONDS:30}
+    read-timeout-seconds: ${AIRBYTE_API_READ_TIMEOUT_SECONDS:600}
+    retries:
+      delay-seconds: ${AIRBYTE_API_RETRY_DELAY_SECONDS:2}
+      max: ${AIRBYTE_API_MAX_RETRIES:5}
+    auth:
+      type: DATAPLANE_ACCESS_TOKEN
+      token-endpoint: ${CONTROL_PLANE_TOKEN_ENDPOINT}
+      client-id: ${DATAPLANE_CLIENT_ID}
+      client-secret: ${DATAPLANE_CLIENT_SECRET}
+  secret:
+    persistence: ${SECRET_PERSISTENCE:TESTING_CONFIG_DB_TABLE}
+    store:
+      aws:
+        region: ${AWS_SECRET_MANAGER_REGION:}
+        kms-key-arn: ${AWS_KMS_KEY_ARN:}
+        tags: ${AWS_SECRET_MANAGER_SECRET_TAGS:}
+        # injects actual secret values
+        access-key: ${AWS_SECRET_MANAGER_ACCESS_KEY_ID:}
+        secret-key: ${AWS_SECRET_MANAGER_SECRET_ACCESS_KEY:}
+      gcp:
+        credentials: ${SECRET_STORE_GCP_CREDENTIALS:}
+        project-id: ${SECRET_STORE_GCP_PROJECT_ID:}
+        region: ${SECRET_STORE_GCP_REGION:}
+      vault:
+        address: ${VAULT_ADDRESS:}
+        prefix: ${VAULT_PREFIX:}
+        # injects the actual secret value
+        token: ${VAULT_AUTH_TOKEN:vaultAuthTokenForTest}
+      azure:
+        vault-url: ${AB_AZURE_KEY_VAULT_VAULT_URL:}
+        tenant-id: ${AB_AZURE_KEY_VAULT_TENANT_ID:}
+        client-id: ${AB_AZURE_KEY_VAULT_CLIENT_ID:}
+        client-secret: ${AB_AZURE_KEY_VAULT_CLIENT_SECRET:}
+        tags: ${AB_AZURE_KEY_VAULT_TAGS:}
+    use-runtime-persistence: ${USE_RUNTIME_SECRET_PERSISTENCE:false}
+  tracking:
+    strategy: ${TRACKING_STRATEGY:LOGGING}
+    write-key: ${SEGMENT_WRITE_KEY:}
+  version: ${AIRBYTE_VERSION}
+  workload-api:
+    base-path: ${WORKLOAD_API_HOST:}
+    connect-timeout-seconds: ${WORKLOAD_API_CONNECT_TIMEOUT_SECONDS:30}
+    read-timeout-seconds: ${WORKLOAD_API_READ_TIMEOUT_SECONDS:300}
+    retries:
+      delay-seconds: ${WORKLOAD_API_RETRY_DELAY_SECONDS:2}
+      max: ${WORKLOAD_API_MAX_RETRIES:5}
+
+endpoints:
+  all:
+    enabled: false
+    port: 8085
+#logger:
+#  levels:
+#    com.zaxxer.hikari: ERROR
+#    com.zaxxer.hikari.pool: ERROR
+#   Uncomment to help resolve issues with conditional beans
+#      io.micronaut.context.condition: DEBUG

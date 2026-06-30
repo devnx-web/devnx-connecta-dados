@@ -1,0 +1,30 @@
+/*
+ * Copyright (c) 2020-2026 Airbyte, Inc., all rights reserved.
+ */
+
+package io.airbyte.data.services
+
+import io.airbyte.data.repositories.entities.DataWorkerUsage
+import java.time.OffsetDateTime
+import java.util.UUID
+
+interface DataWorkerUsageDataService {
+  fun findMostRecentUsageBucket(
+    organizationId: UUID,
+    workspaceId: UUID,
+    dataplaneGroupID: UUID,
+    bucketStart: OffsetDateTime,
+  ): DataWorkerUsage?
+
+  fun insertNewDataWorkerUsageBucket(dataWorkerUsage: DataWorkerUsage)
+
+  fun incrementExistingDataWorkerUsageBucket(dataWorkerUsage: DataWorkerUsage): Int
+
+  fun decrementExistingDataWorkerUsageBucket(dataWorkerUsage: DataWorkerUsage): Int
+
+  fun getDataWorkerUsageByOrganizationAndTimeRange(
+    organizationId: UUID,
+    startDate: OffsetDateTime,
+    endDate: OffsetDateTime,
+  ): List<DataWorkerUsage>
+}

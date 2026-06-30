@@ -1,0 +1,520 @@
+/*
+ * Copyright (c) 2020-2026 Airbyte, Inc., all rights reserved.
+ */
+
+package io.airbyte.data.repositories
+
+import io.airbyte.data.repositories.entities.OrganizationDomainVerification
+import io.airbyte.db.instance.configs.jooq.generated.Keys
+import io.airbyte.db.instance.configs.jooq.generated.Tables
+import io.airbyte.db.instance.configs.jooq.generated.enums.DomainVerificationMethod
+import io.airbyte.db.instance.configs.jooq.generated.enums.DomainVerificationStatus
+import io.micronaut.test.extensions.junit5.annotation.MicronautTest
+import org.junit.jupiter.api.AfterEach
+import org.junit.jupiter.api.BeforeAll
+import org.junit.jupiter.api.Test
+import java.util.UUID
+
+@MicronautTest
+class OrganizationDomainVerificationRepositoryTest : AbstractConfigRepositoryTest() {
+  companion object {
+    @BeforeAll
+    @JvmStatic
+    fun setup() {
+      jooqDslContext
+        .alterTable(Tables.ORGANIZATION_DOMAIN_VERIFICATION)
+        .dropForeignKey(Keys.ORGANIZATION_DOMAIN_VERIFICATION__ORGANIZATION_DOMAIN_VERIFICATION_ORGANIZATION_ID_FKEY.constraint())
+        .execute()
+
+      jooqDslContext
+        .alterTable(Tables.ORGANIZATION_DOMAIN_VERIFICATION)
+        .dropForeignKey(Keys.ORGANIZATION_DOMAIN_VERIFICATION__ORGANIZATION_DOMAIN_VERIFICATION_CREATED_BY_FKEY.constraint())
+        .execute()
+    }
+  }
+
+  @AfterEach
+  fun tearDown() {
+    organizationDomainVerificationRepository.deleteAll()
+  }
+
+  @Test
+  fun `test db insertion`() {
+    val organizationId = UUID.randomUUID()
+    val verification =
+      OrganizationDomainVerification(
+        organizationId = organizationId,
+        domain = "example.com",
+        verificationMethod = DomainVerificationMethod.dns_txt,
+        status = DomainVerificationStatus.pending,
+        verificationToken = "abc123",
+        dnsRecordName = "_airbyte-verification.example.com",
+        dnsRecordPrefix = "_airbyte-verification",
+      )
+
+    val countBeforeSave = organizationDomainVerificationRepository.count()
+    assert(countBeforeSave == 0L)
+
+    val saveResult = organizationDomainVerificationRepository.save(verification)
+    val countAfterSave = organizationDomainVerificationRepository.count()
+    assert(countAfterSave == 1L)
+
+    val persisted = organizationDomainVerificationRepository.findById(saveResult.id!!).get()
+    assert(persisted.organizationId == organizationId)
+    assert(persisted.domain == "example.com")
+    assert(persisted.status == DomainVerificationStatus.pending)
+    assert(persisted.verificationMethod == DomainVerificationMethod.dns_txt)
+  }
+
+  @Test
+  fun `test findByOrganizationId returns all domains for org`() {
+    val org1 = UUID.randomUUID()
+    val org2 = UUID.randomUUID()
+
+    // Create 2 domains for org1
+    organizationDomainVerificationRepository.save(
+      OrganizationDomainVerification(
+        organizationId = org1,
+        domain = "example.com",
+        verificationMethod = DomainVerificationMethod.dns_txt,
+        status = DomainVerificationStatus.pending,
+        verificationToken = "token1",
+        dnsRecordName = "_airbyte-verification.example.com",
+        dnsRecordPrefix = "_airbyte-verification",
+      ),
+    )
+    organizationDomainVerificationRepository.save(
+      OrganizationDomainVerification(
+        organizationId = org1,
+        domain = "test.com",
+        verificationMethod = DomainVerificationMethod.dns_txt,
+        status = DomainVerificationStatus.verified,
+        verificationToken = "token2",
+        dnsRecordName = "_airbyte-verification.test.com",
+        dnsRecordPrefix = "_airbyte-verification",
+      ),
+    )
+
+    // Create 1 domain for org2
+    organizationDomainVerificationRepository.save(
+      OrganizationDomainVerification(
+        organizationId = org2,
+        domain = "other.com",
+        verificationMethod = DomainVerificationMethod.dns_txt,
+        status = DomainVerificationStatus.pending,
+        verificationToken = "token3",
+        dnsRecordName = "_airbyte-verification.other.com",
+        dnsRecordPrefix = "_airbyte-verification",
+      ),
+    )
+
+    val org1Domains = organizationDomainVerificationRepository.findByOrganizationId(org1, false)
+    assert(org1Domains.size == 2)
+    assert(org1Domains.all { it.organizationId == org1 })
+
+    val org2Domains = organizationDomainVerificationRepository.findByOrganizationId(org2, false)
+    assert(org2Domains.size == 1)
+    assert(org2Domains[0].domain == "other.com")
+  }
+
+  @Test
+  fun `test findByOrganizationIdAndDomain finds exact match`() {
+    val org1 = UUID.randomUUID()
+    val org2 = UUID.randomUUID()
+
+    organizationDomainVerificationRepository.save(
+      OrganizationDomainVerification(
+        organizationId = org1,
+        domain = "example.com",
+        verificationMethod = DomainVerificationMethod.dns_txt,
+        status = DomainVerificationStatus.verified,
+        verificationToken = "token1",
+        dnsRecordName = "_airbyte-verification.example.com",
+        dnsRecordPrefix = "_airbyte-verification",
+      ),
+    )
+    organizationDomainVerificationRepository.save(
+      OrganizationDomainVerification(
+        organizationId = org2,
+        domain = "test.com",
+        verificationMethod = DomainVerificationMethod.dns_txt,
+        status = DomainVerificationStatus.pending,
+        verificationToken = "token2",
+        dnsRecordName = "_airbyte-verification.test.com",
+        dnsRecordPrefix = "_airbyte-verification",
+      ),
+    )
+
+    val found = organizationDomainVerificationRepository.findByOrganizationIdAndDomain(org1, "example.com", false)
+    assert(found.isNotEmpty())
+    assert(found.first().organizationId == org1)
+    assert(found.first().domain == "example.com")
+    assert(found.first().status == DomainVerificationStatus.verified)
+
+    val notFound = organizationDomainVerificationRepository.findByOrganizationIdAndDomain(org1, "test.com", false)
+    assert(notFound.isEmpty())
+  }
+
+  @Test
+  fun `test findByStatus returns only matching status`() {
+    val org1 = UUID.randomUUID()
+    val org2 = UUID.randomUUID()
+    val org3 = UUID.randomUUID()
+
+    organizationDomainVerificationRepository.save(
+      OrganizationDomainVerification(
+        organizationId = org1,
+        domain = "pending1.com",
+        verificationMethod = DomainVerificationMethod.dns_txt,
+        status = DomainVerificationStatus.pending,
+        verificationToken = "token1",
+        dnsRecordName = "_airbyte-verification.pending1.com",
+        dnsRecordPrefix = "_airbyte-verification",
+      ),
+    )
+    organizationDomainVerificationRepository.save(
+      OrganizationDomainVerification(
+        organizationId = org2,
+        domain = "pending2.com",
+        verificationMethod = DomainVerificationMethod.dns_txt,
+        status = DomainVerificationStatus.pending,
+        verificationToken = "token2",
+        dnsRecordName = "_airbyte-verification.pending2.com",
+        dnsRecordPrefix = "_airbyte-verification",
+      ),
+    )
+    organizationDomainVerificationRepository.save(
+      OrganizationDomainVerification(
+        organizationId = org3,
+        domain = "verified.com",
+        verificationMethod = DomainVerificationMethod.dns_txt,
+        status = DomainVerificationStatus.verified,
+        verificationToken = "token3",
+        dnsRecordName = "_airbyte-verification.verified.com",
+        dnsRecordPrefix = "_airbyte-verification",
+      ),
+    )
+
+    val pending = organizationDomainVerificationRepository.findByStatus(DomainVerificationStatus.pending, false)
+    assert(pending.size == 2)
+    assert(pending.all { it.status == DomainVerificationStatus.pending })
+
+    val verified = organizationDomainVerificationRepository.findByStatus(DomainVerificationStatus.verified, false)
+    assert(verified.size == 1)
+    assert(verified[0].domain == "verified.com")
+
+    val expired = organizationDomainVerificationRepository.findByStatus(DomainVerificationStatus.expired, false)
+    assert(expired.isEmpty())
+  }
+
+  @Test
+  fun `test enum types are stored correctly`() {
+    val orgId = UUID.randomUUID()
+
+    val dnsTxt =
+      organizationDomainVerificationRepository.save(
+        OrganizationDomainVerification(
+          organizationId = orgId,
+          domain = "dns.com",
+          verificationMethod = DomainVerificationMethod.dns_txt,
+          status = DomainVerificationStatus.pending,
+          verificationToken = "token1",
+          dnsRecordName = "_airbyte-verification.dns.com",
+          dnsRecordPrefix = "_airbyte-verification",
+        ),
+      )
+    assert(dnsTxt.verificationMethod == DomainVerificationMethod.dns_txt)
+
+    val legacy =
+      organizationDomainVerificationRepository.save(
+        OrganizationDomainVerification(
+          organizationId = orgId,
+          domain = "legacy.com",
+          verificationMethod = DomainVerificationMethod.legacy,
+          status = DomainVerificationStatus.verified,
+        ),
+      )
+    assert(legacy.verificationMethod == DomainVerificationMethod.legacy)
+  }
+
+  @Test
+  fun `test dns_txt method fails without verificationToken`() {
+    val orgId = UUID.randomUUID()
+
+    // Should throw exception - dns_txt requires all DNS fields
+    val exception =
+      org.junit.jupiter.api.assertThrows<Exception> {
+        organizationDomainVerificationRepository.save(
+          OrganizationDomainVerification(
+            organizationId = orgId,
+            domain = "example.com",
+            verificationMethod = DomainVerificationMethod.dns_txt,
+            status = DomainVerificationStatus.pending,
+            verificationToken = null,
+            dnsRecordName = "_airbyte-verification.example.com",
+            dnsRecordPrefix = "_airbyte-verification",
+          ),
+        )
+      }
+
+    assert(
+      exception.message?.contains("check_dns_fields_required_for_dns_txt") == true ||
+        exception.message?.contains("constraint") == true,
+    )
+  }
+
+  @Test
+  fun `test legacy method can save without DNS fields`() {
+    val orgId = UUID.randomUUID()
+
+    // Legacy should save successfully without DNS fields
+    val legacy =
+      organizationDomainVerificationRepository.save(
+        OrganizationDomainVerification(
+          organizationId = orgId,
+          domain = "legacy.com",
+          verificationMethod = DomainVerificationMethod.legacy,
+          status = DomainVerificationStatus.pending,
+          verificationToken = null,
+          dnsRecordName = null,
+          dnsRecordPrefix = null,
+        ),
+      )
+
+    assert(legacy.id != null)
+    assert(legacy.verificationMethod == DomainVerificationMethod.legacy)
+    assert(legacy.verificationToken == null)
+    assert(legacy.dnsRecordName == null)
+    assert(legacy.dnsRecordPrefix == null)
+
+    val retrieved = organizationDomainVerificationRepository.findById(legacy.id!!).get()
+    assert(retrieved.verificationMethod == DomainVerificationMethod.legacy)
+  }
+
+  @Test
+  fun `test findByOrganizationId with includeDeleted parameter`() {
+    val orgId = UUID.randomUUID()
+
+    // Create 2 active domains
+    organizationDomainVerificationRepository.save(
+      OrganizationDomainVerification(
+        organizationId = orgId,
+        domain = "active1.com",
+        verificationMethod = DomainVerificationMethod.dns_txt,
+        status = DomainVerificationStatus.verified,
+        verificationToken = "token1",
+        dnsRecordName = "_airbyte-verification.active1.com",
+        dnsRecordPrefix = "_airbyte-verification",
+        tombstone = false,
+      ),
+    )
+    organizationDomainVerificationRepository.save(
+      OrganizationDomainVerification(
+        organizationId = orgId,
+        domain = "active2.com",
+        verificationMethod = DomainVerificationMethod.dns_txt,
+        status = DomainVerificationStatus.verified,
+        verificationToken = "token2",
+        dnsRecordName = "_airbyte-verification.active2.com",
+        dnsRecordPrefix = "_airbyte-verification",
+        tombstone = false,
+      ),
+    )
+
+    // Create 1 tombstoned (deleted) domain
+    organizationDomainVerificationRepository.save(
+      OrganizationDomainVerification(
+        organizationId = orgId,
+        domain = "deleted.com",
+        verificationMethod = DomainVerificationMethod.dns_txt,
+        status = DomainVerificationStatus.verified,
+        verificationToken = "token3",
+        dnsRecordName = "_airbyte-verification.deleted.com",
+        dnsRecordPrefix = "_airbyte-verification",
+        tombstone = true,
+      ),
+    )
+
+    val active = organizationDomainVerificationRepository.findByOrganizationId(orgId, includeDeleted = false)
+    assert(active.size == 2)
+    assert(active.none { it.tombstone })
+    assert(active.all { it.domain in listOf("active1.com", "active2.com") })
+
+    val all = organizationDomainVerificationRepository.findByOrganizationId(orgId, includeDeleted = true)
+    assert(all.size == 3)
+    assert(all.count { !it.tombstone } == 2)
+    assert(all.count { it.tombstone } == 1)
+  }
+
+  @Test
+  fun `test findByOrganizationIdAndDomain with includeDeleted parameter`() {
+    val orgId = UUID.randomUUID()
+
+    // Create active domain
+    organizationDomainVerificationRepository.save(
+      OrganizationDomainVerification(
+        organizationId = orgId,
+        domain = "example.com",
+        verificationMethod = DomainVerificationMethod.dns_txt,
+        status = DomainVerificationStatus.verified,
+        verificationToken = "token1",
+        dnsRecordName = "_airbyte-verification.example.com",
+        dnsRecordPrefix = "_airbyte-verification",
+        tombstone = false,
+      ),
+    )
+
+    // Create tombstoned domain with SAME name in SAME org
+    organizationDomainVerificationRepository.save(
+      OrganizationDomainVerification(
+        organizationId = orgId,
+        domain = "example1.com",
+        verificationMethod = DomainVerificationMethod.dns_txt,
+        status = DomainVerificationStatus.expired,
+        verificationToken = "token2",
+        dnsRecordName = "_airbyte-verification.example.com",
+        dnsRecordPrefix = "_airbyte-verification",
+        tombstone = true,
+      ),
+    )
+
+    val found =
+      organizationDomainVerificationRepository.findByOrganizationIdAndDomain(
+        orgId,
+        "example.com",
+        includeDeleted = false,
+      )
+    assert(found.isNotEmpty())
+    assert(!found.first().tombstone)
+    assert(found.first().status == DomainVerificationStatus.verified)
+
+    val foundWithDeleted =
+      organizationDomainVerificationRepository.findByOrganizationIdAndDomain(
+        orgId,
+        "example.com",
+        includeDeleted = true,
+      )
+    assert(foundWithDeleted.isNotEmpty())
+  }
+
+  @Test
+  fun `test findByStatus with includeDeleted parameter`() {
+    val org1 = UUID.randomUUID()
+    val org2 = UUID.randomUUID()
+
+    // Active pending domain
+    organizationDomainVerificationRepository.save(
+      OrganizationDomainVerification(
+        organizationId = org1,
+        domain = "active-pending.com",
+        verificationMethod = DomainVerificationMethod.dns_txt,
+        status = DomainVerificationStatus.pending,
+        verificationToken = "token1",
+        dnsRecordName = "_airbyte-verification.active-pending.com",
+        dnsRecordPrefix = "_airbyte-verification",
+        tombstone = false,
+      ),
+    )
+
+    // Tombstoned pending domain
+    organizationDomainVerificationRepository.save(
+      OrganizationDomainVerification(
+        organizationId = org2,
+        domain = "deleted-pending.com",
+        verificationMethod = DomainVerificationMethod.dns_txt,
+        status = DomainVerificationStatus.pending,
+        verificationToken = "token2",
+        dnsRecordName = "_airbyte-verification.deleted-pending.com",
+        dnsRecordPrefix = "_airbyte-verification",
+        tombstone = true,
+      ),
+    )
+
+    val activePending =
+      organizationDomainVerificationRepository.findByStatus(
+        DomainVerificationStatus.pending,
+        includeDeleted = false,
+      )
+    assert(activePending.size == 1)
+    assert(activePending[0].domain == "active-pending.com")
+    assert(!activePending[0].tombstone)
+
+    val allPending =
+      organizationDomainVerificationRepository.findByStatus(
+        DomainVerificationStatus.pending,
+        includeDeleted = true,
+      )
+    assert(allPending.size == 2)
+    assert(allPending.count { !it.tombstone } == 1)
+    assert(allPending.count { it.tombstone } == 1)
+  }
+
+  @Test
+  fun `test soft-delete then insert same organization_id and domain`() {
+    val orgId = UUID.randomUUID()
+    val domain = "reusable-domain.com"
+
+    // Insert first record
+    val firstRecord =
+      organizationDomainVerificationRepository.save(
+        OrganizationDomainVerification(
+          organizationId = orgId,
+          domain = domain,
+          verificationMethod = DomainVerificationMethod.dns_txt,
+          status = DomainVerificationStatus.verified,
+          verificationToken = "token1",
+          dnsRecordName = "_airbyte-verification.$domain",
+          dnsRecordPrefix = "_airbyte-verification",
+          tombstone = false,
+        ),
+      )
+    assert(firstRecord.id != null)
+
+    // Soft-delete the first record
+    val deletedRecord =
+      organizationDomainVerificationRepository.update(
+        firstRecord.copy(tombstone = true),
+      )
+    assert(deletedRecord.tombstone)
+
+    // Insert second record with same organization_id and domain (should succeed)
+    val secondRecord =
+      organizationDomainVerificationRepository.save(
+        OrganizationDomainVerification(
+          organizationId = orgId,
+          domain = domain,
+          verificationMethod = DomainVerificationMethod.dns_txt,
+          status = DomainVerificationStatus.pending,
+          verificationToken = "token2",
+          dnsRecordName = "_airbyte-verification.$domain",
+          dnsRecordPrefix = "_airbyte-verification",
+          tombstone = false,
+        ),
+      )
+    assert(secondRecord.id != null)
+    assert(secondRecord.id != firstRecord.id)
+
+    // Verify both records exist when including deleted
+    val allRecords =
+      organizationDomainVerificationRepository.findByOrganizationIdAndDomain(
+        orgId,
+        domain,
+        includeDeleted = true,
+      )
+    assert(allRecords.size == 2)
+    assert(allRecords.count { it.tombstone } == 1)
+    assert(allRecords.count { !it.tombstone } == 1)
+
+    // Verify only active record is returned when excluding deleted
+    val activeRecords =
+      organizationDomainVerificationRepository.findByOrganizationIdAndDomain(
+        orgId,
+        domain,
+        includeDeleted = false,
+      )
+    assert(activeRecords.size == 1)
+    assert(activeRecords[0].id == secondRecord.id)
+    assert(!activeRecords[0].tombstone)
+    assert(activeRecords[0].status == DomainVerificationStatus.pending)
+  }
+}

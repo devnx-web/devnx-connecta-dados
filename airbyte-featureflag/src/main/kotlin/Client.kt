@@ -1,0 +1,486 @@
+/*
+ * Copyright (c) 2020-2026 Airbyte, Inc., all rights reserved.
+ */
+
+package io.airbyte.featureflag
+
+import com.fasterxml.jackson.databind.ObjectMapper
+import com.fasterxml.jackson.dataformat.yaml.YAMLFactory
+import com.fasterxml.jackson.module.kotlin.readValue
+import com.fasterxml.jackson.module.kotlin.registerKotlinModule
+import com.launchdarkly.sdk.ContextKind
+import com.launchdarkly.sdk.LDContext
+import com.launchdarkly.sdk.server.LDClient
+import io.airbyte.commons.annotation.InternalForTesting
+import io.airbyte.micronaut.runtime.AirbyteFeatureFlagConfig
+import io.github.oshai.kotlinlogging.KotlinLogging
+import io.micronaut.context.annotation.Requires
+import io.micronaut.context.annotation.Secondary
+import jakarta.inject.Inject
+import jakarta.inject.Named
+import jakarta.inject.Singleton
+import okhttp3.OkHttpClient
+import okhttp3.Request
+import java.lang.Thread.MIN_PRIORITY
+import java.nio.file.Path
+import java.nio.file.StandardWatchEventKinds
+import java.nio.file.WatchService
+import java.util.concurrent.locks.ReentrantReadWriteLock
+import kotlin.concurrent.read
+import kotlin.concurrent.thread
+import kotlin.concurrent.write
+import kotlin.io.path.isRegularFile
+import kotlin.io.path.notExists
+
+private val log = KotlinLogging.logger {}
+
+/**
+ * Feature-Flag Client interface.
+ *
+ * Note: Use the [TestClient] if needing to create a mock as Mockito does not currently
+ * support mocking a sealed interface, however it does support mocking an implementation
+ * of a sealed interface.
+ */
+sealed interface FeatureFlagClient {
+  /**
+   * Calculates the boolean value of the [flag] for the given [context].
+   *
+   * Returns the [flag] default value if the [flag] cannot be evaluated.
+   */
+  fun boolVariation(
+    flag: Flag<Boolean>,
+    context: Context,
+  ): Boolean
+
+  /**
+   * Calculates the string value of the [flag] for the given [context].
+   *
+   * Returns the [flag] default value if no calculated value exists.
+   */
+  fun stringVariation(
+    flag: Flag<String>,
+    context: Context,
+  ): String
+
+  /**
+   * Calculates the string value of the [flag] for the given [context].
+   *
+   * Returns the [flag] default value if no calculated value exists.
+   */
+  fun intVariation(
+    flag: Flag<Int>,
+    context: Context,
+  ): Int
+
+  /**
+   * Calculates the value of the [flag] for the given [context].  This method
+   * defers to the typed variants of this method declared in this client.
+   *
+   * Returns the [flag] default value if no calculated value exists
+   */
+  @Suppress("UNCHECKED_CAST")
+  fun <T> variation(
+    flag: Flag<T>,
+    context: Context,
+  ): T =
+    when (flag.default) {
+      is Boolean -> boolVariation(flag = flag as Flag<Boolean>, context = context)
+      is Int -> intVariation(flag = flag as Flag<Int>, context = context)
+      is String -> stringVariation(flag = flag as Flag<String>, context = context)
+      else -> throw IllegalArgumentException(
+        "Unsupported flag type: ${if (flag.default != null) flag.default::class.java.name else null}",
+      ) as Throwable
+    } as T
+}
+
+/** Config key used to determine which [FeatureFlagClient] to expose. */
+internal const val CONFIG_FF_CLIENT = "airbyte.feature-flag.client"
+
+/** If [CONFIG_FF_CLIENT] equals this value, return the [LaunchDarklyClient], otherwise the [ConfigFileClient]. */
+internal const val CONFIG_FF_CLIENT_VAL_LAUNCHDARKLY = "launchdarkly"
+internal const val CONFIG_FF_CLIENT_VAL_FFS = "ffs"
+
+/**
+ * A file-based feature flag client that reads flag configurations from YAML files.
+ *
+ * This client is ideal for:
+ * - Development and testing environments
+ * - Self-hosted deployments where external feature flag services aren't desired
+ * - Quick flag configuration changes without external dependencies
+ *
+ * Key features:
+ * - Real-time file watching with automatic configuration reloading
+ * - Context-aware flag evaluation based on workspace, user, organization, etc.
+ * - Thread-safe flag updates using read-write locks
+ * - Graceful fallback to default values when configuration is missing
+ * - Support for legacy [EnvVar] flags during migration
+ *
+ * The YAML configuration format supports:
+ * - Simple flag values (boolean, string, int)
+ * - Context-specific overrides for targeted rollouts
+ * - Multiple context types and inclusion lists
+ *
+ * @param config Optional path to the YAML configuration file. If null, all flags return defaults.
+ *               If provided, the file will be monitored for changes and reloaded automatically.
+ */
+@Singleton
+@Requires(property = CONFIG_FF_CLIENT, notEquals = CONFIG_FF_CLIENT_VAL_FFS)
+@Requires(property = CONFIG_FF_CLIENT, notEquals = CONFIG_FF_CLIENT_VAL_LAUNCHDARKLY)
+class ConfigFileClient(
+  airbyteFeatureFlagConfig: AirbyteFeatureFlagConfig,
+) : FeatureFlagClient {
+  /** [flags] holds the mappings of the flag-name to the flag properties */
+  private var flags: Map<String, ConfigFileFlag> = mapOf()
+
+  /** lock is used for ensuring access to the flags map is handled correctly when the map is being updated. */
+  private val lock = ReentrantReadWriteLock()
+
+  init {
+    airbyteFeatureFlagConfig.path.also { path ->
+      when {
+        path.notExists() -> log.info { "path $path does not exist, will return default flag values" }
+        !path.isRegularFile() -> log.info { "path $path does not reference a file, will return default values" }
+        else -> {
+          flags = readConfig(path)
+          path.onChange {
+            lock.write { flags = readConfig(path) }
+          }
+        }
+      }
+    }
+  }
+
+  override fun boolVariation(
+    flag: Flag<Boolean>,
+    context: Context,
+  ): Boolean {
+    if (flag is EnvVar) {
+      return flag.enabled(context)
+    }
+    return lock.read {
+      flags[flag.key]?.serve(context)?.let { it as? Boolean } ?: flag.default
+    }
+  }
+
+  override fun stringVariation(
+    flag: Flag<String>,
+    context: Context,
+  ): String = flags[flag.key]?.serve(context)?.let { it as? String } ?: flag.default
+
+  override fun intVariation(
+    flag: Flag<Int>,
+    context: Context,
+  ): Int = flags[flag.key]?.serve(context)?.let { it as? Int } ?: flag.default
+}
+
+/**
+ * LaunchDarkly-based feature flag client for production feature flag management.
+ *
+ * This client integrates with LaunchDarkly's service to provide:
+ * - Advanced targeting and segmentation capabilities
+ * - Real-time flag updates without deployments
+ * - A/B testing and gradual rollouts
+ * - Comprehensive analytics and monitoring
+ * - Enterprise-grade reliability and performance
+ *
+ * The client supports:
+ * - Context interception for dynamic context enrichment
+ * - All Airbyte context types (User, Workspace, Organization, etc.)
+ * - Fallback to default values when LaunchDarkly is unavailable
+ * - Legacy [EnvVar] flag support during migration
+ *
+ * @param client The LaunchDarkly SDK client instance for communicating with LaunchDarkly services
+ */
+@Singleton
+@Requires(property = CONFIG_FF_CLIENT, value = CONFIG_FF_CLIENT_VAL_LAUNCHDARKLY)
+class LaunchDarklyClient(
+  private val client: LDClient,
+) : FeatureFlagClient {
+  private var contextInterceptor: ContextInterceptor? = null
+
+  override fun boolVariation(
+    flag: Flag<Boolean>,
+    context: Context,
+  ): Boolean =
+    when (flag) {
+      is EnvVar -> flag.enabled(context)
+      else -> client.boolVariation(flag.key, getFinalContext(context), flag.default)
+    }
+
+  override fun stringVariation(
+    flag: Flag<String>,
+    context: Context,
+  ): String = client.stringVariation(flag.key, getFinalContext(context), flag.default)
+
+  override fun intVariation(
+    flag: Flag<Int>,
+    context: Context,
+  ): Int = client.intVariation(flag.key, getFinalContext(context), flag.default)
+
+  fun registerContextInterceptor(interceptor: ContextInterceptor) {
+    contextInterceptor = interceptor
+  }
+
+  private fun getFinalContext(context: Context): LDContext = (contextInterceptor?.intercept(context) ?: context).toLDContext()
+}
+
+/**
+ * Custom Airbyte Feature Flag Service client for HTTP-based flag evaluation.
+ *
+ * This client communicates with Airbyte's custom feature flag service via HTTP API.
+ * It's designed for scenarios where LaunchDarkly isn't suitable or available,
+ * but more sophisticated targeting is needed than simple config files provide.
+ *
+ * Features:
+ * - HTTP-based flag evaluation with REST API
+ * - Context serialization as query parameters
+ * - Graceful fallback to default values on service errors
+ * - Configurable base URL for different environments
+ *
+ * @param httpClient The HTTP client for making requests to the feature flag service
+ * @param baseUrl The base URL of the feature flag service API
+ */
+@Singleton
+@Requires(property = CONFIG_FF_CLIENT, value = CONFIG_FF_CLIENT_VAL_FFS)
+class FeatureFlagServiceClient(
+  @Named("ffsHttpClient") private val httpClient: OkHttpClient,
+  private val airbyteFeatureFlagConfig: AirbyteFeatureFlagConfig,
+) : FeatureFlagClient {
+  private val basePath = "/api/v1/feature-flags"
+
+  override fun boolVariation(
+    flag: Flag<Boolean>,
+    context: Context,
+  ): Boolean = callFeatureFlagService(flag.key, context)?.toBoolean() ?: flag.default
+
+  override fun stringVariation(
+    flag: Flag<String>,
+    context: Context,
+  ): String = callFeatureFlagService(flag.key, context) ?: flag.default
+
+  override fun intVariation(
+    flag: Flag<Int>,
+    context: Context,
+  ): Int = callFeatureFlagService(flag.key, context)?.toInt() ?: flag.default
+
+  private fun callFeatureFlagService(
+    key: String,
+    context: Context,
+  ): String? {
+    val request =
+      Request
+        .Builder()
+        .url("${airbyteFeatureFlagConfig.baseUrl}$basePath/$key/evaluate?${context.toQueryParams()}")
+        .build()
+    return httpClient.newCall(request).execute().use {
+      if (it.code == 200) it.body?.string() else null
+    }
+  }
+
+  private fun Context.toQueryParams(): String =
+    when (this) {
+      is Multi -> contexts.joinToString("&") { it.toQueryParams() }
+      else -> "kind=$kind&value=$key"
+    }
+}
+
+/**
+ * Test feature-flag client. Only to be used in test scenarios.
+ *
+ * This class can be mocked and can also be used with Micronaut's @MockBean annotation to replace the [FeatureFlagClient] dependency.
+ *
+ * To use with the @MockBean annotation define the following method within your @MicronautTest annotated test class:
+ * ```java
+ * @MockBean(FeatureFlagClient.class)
+ * TestClient featureFlagClient() {
+ *   return mock(TestClient.class);
+ * }
+ * ```
+ *
+ * All [Flag] instances will use the provided [values] map as their source of truth, including [EnvVar] flags.
+ *
+ * @param [values] is a map of [Flag.key] to its status.
+ */
+@Secondary
+open class TestClient(
+  val values: Map<String, Any>,
+) : FeatureFlagClient {
+  @Inject
+  constructor() : this(mapOf())
+
+  override fun boolVariation(
+    flag: Flag<Boolean>,
+    context: Context,
+  ): Boolean =
+    when (flag) {
+      is EnvVar -> {
+        // convert to a EnvVar flag with a custom fetcher that uses the [values] of this Test class
+        // instead of fetching from the environment variables
+        EnvVar(envVar = flag.key, default = flag.default, attrs = flag.attrs)
+          .apply {
+            fetcher = { values[flag.key]?.toString() ?: flag.default.toString() }
+          }.enabled(context)
+      }
+
+      else -> values[flag.key]?.let { it as? Boolean } ?: flag.default
+    }
+
+  override fun stringVariation(
+    flag: Flag<String>,
+    context: Context,
+  ): String = values[flag.key]?.let { it as? String } ?: flag.default
+
+  override fun intVariation(
+    flag: Flag<Int>,
+    context: Context,
+  ): Int = values[flag.key]?.let { it as? Int } ?: flag.default
+}
+
+/**
+ * Data wrapper around OSS feature-flag configuration file.
+ *
+ * The file has the format of:
+ * flags:
+ *  - name: feature-one
+ *    enabled: true
+ *  - name: feature-two
+ *    enabled: false
+ */
+private data class ConfigFileFlags(
+  val flags: List<ConfigFileFlag>,
+)
+
+/**
+ * Data wrapper around an individual flag read from the configuration file.
+ */
+private data class ConfigFileFlag(
+  val name: String,
+  val serve: Any,
+  val context: List<ConfigFileFlagContext>? = null,
+) {
+  /**
+   * Map of context kind to list of contexts.
+   *
+   * Example:
+   * {
+   *   "workspace": [
+   *     { "serve": "true", include: ["000000-...", "111111-..."] }
+   *   ]
+   * }
+   */
+  private val contextsByType: Map<String, List<ConfigFileFlagContext>> =
+    context?.groupBy { it.type } ?: mapOf()
+
+  /**
+   * Serve checks the [ctx] to see if it matches any contexts that may have
+   * been defined in the flags.yml file.  If it does match, the serve value
+   * from the matching context section will be returned.  If it does not
+   * match, the non-context serve value will be returned.
+   */
+  fun serve(ctx: Context): Any {
+    if (contextsByType.isEmpty()) {
+      return serve
+    }
+    return when (ctx) {
+      is Multi ->
+        ctx.contexts
+          .map { serve(it) }
+          .find { it != serve } ?: serve
+      else ->
+        contextsByType[ctx.kind]
+          ?.findLast { it.include.contains(ctx.key) }
+          ?.serve
+          ?: serve
+    }
+  }
+}
+
+private data class ConfigFileFlagContext(
+  val type: String,
+  val serve: Any,
+  val include: List<String> = listOf(),
+)
+
+/** The yaml mapper is used for reading the feature-flag configuration file. */
+private val yamlMapper = ObjectMapper(YAMLFactory()).registerKotlinModule()
+
+/**
+ * Reads a yaml configuration file, converting it into a map of flag name to flag configuration.
+ *
+ * @param [path] to yaml config file
+ * @return map of feature-flag name to feature-flag config
+ */
+private fun readConfig(path: Path): Map<String, ConfigFileFlag> = yamlMapper.readValue<ConfigFileFlags>(path.toFile()).flags.associateBy { it.name }
+
+/**
+ * Extension function that monitors a file path for changes and executes a callback when changes occur.
+ *
+ * This function sets up a file system watcher using Java NIO's WatchService to monitor
+ * the parent directory of the given file. When the file is modified or created, the
+ * provided callback function is executed.
+ *
+ * The implementation:
+ * - Registers the parent directory with the WatchService (since individual files can't be watched)
+ * - Filters events to only respond to changes to the specific file
+ * - Runs the watcher in a low-priority daemon thread to avoid blocking the main application
+ * - Handles both ENTRY_MODIFY and ENTRY_CREATE events
+ *
+ * This is used by ConfigFileClient to reload flag configurations in real-time.
+ *
+ * @receiver The Path to the file to monitor for changes
+ * @param block The callback function to execute when the file changes
+ */
+private fun Path.onChange(block: () -> Unit) {
+  val watcher: WatchService = fileSystem.newWatchService()
+  // The watcher service requires a directory to be registered and not an individual file. This Path is an individual file,
+  // hence the `parent` reference to register the parent of this file (which is the directory that contains this file).
+  // As all files within this directory could send events, any file that doesn't match this Path will need to be filtered out.
+  parent.register(watcher, StandardWatchEventKinds.ENTRY_MODIFY, StandardWatchEventKinds.ENTRY_CREATE)
+
+  thread(isDaemon = true, name = "feature-flag-watcher", priority = MIN_PRIORITY) {
+    val key = watcher.take()
+    // The context on the poll-events for ENTRY_MODIFY and ENTRY_CREATE events should return a Path,
+    // however officially `Returns: the event context; may be null`, so there is a null check here
+    key
+      .pollEvents()
+      .mapNotNull { it.context() as? Path }
+      // As events are generated at the directory level and not the file level, any files that do not match the specific file
+      // this Path represents must be filtered out.
+      // E.g.
+      // If this path is "/tmp/dir/flags.yml",
+      // the directory registered with the WatchService was "/tmp/dir",
+      // and the event's path would be "flags.yml".
+      //
+      // This filter verifies that "/tmp/dir/flags.yml" ends with "flags.yml" before calling the block method.
+      .filter { this.endsWith(it) }
+      .forEach { _ -> block() }
+
+    key.reset()
+  }
+}
+
+/**
+ * LaunchDarkly v6 version
+ */
+@InternalForTesting
+internal fun Context.toLDContext(): LDContext {
+  if (this is Multi) {
+    val builder = LDContext.multiBuilder()
+    contexts.forEach { builder.add(it.toLDContext()) }
+    return builder.build()
+  }
+
+  val builder = LDContext.builder(ContextKind.of(kind), key)
+  if (key == ANONYMOUS.toString()) {
+    builder.anonymous(true)
+  }
+
+  attrs.forEach {
+    builder.set(it.key, it.value)
+    if (it.private) {
+      builder.privateAttributes(it.key)
+    }
+  }
+
+  return builder.build()
+}

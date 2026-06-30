@@ -1,0 +1,148 @@
+/*
+ * Copyright (c) 2020-2026 Airbyte, Inc., all rights reserved.
+ */
+
+package io.airbyte.server.apis.controllers
+
+import io.airbyte.api.model.generated.OrganizationIdRequestBody
+import io.airbyte.api.model.generated.OrganizationUserReadList
+import io.airbyte.api.model.generated.UserAuthIdRequestBody
+import io.airbyte.api.model.generated.UserEmailRequestBody
+import io.airbyte.api.model.generated.UserGetOrCreateByAuthIdResponse
+import io.airbyte.api.model.generated.UserIdRequestBody
+import io.airbyte.api.model.generated.UserRead
+import io.airbyte.api.model.generated.UserUpdate
+import io.airbyte.api.model.generated.UserWithPermissionInfoReadList
+import io.airbyte.api.model.generated.WorkspaceIdRequestBody
+import io.airbyte.api.model.generated.WorkspaceUserAccessInfoReadList
+import io.airbyte.commons.json.Jsons
+import io.airbyte.commons.server.handlers.UserHandler
+import io.airbyte.server.assertStatus
+import io.airbyte.server.status
+import io.micronaut.context.ApplicationContext
+import io.micronaut.http.HttpRequest
+import io.micronaut.http.HttpStatus
+import io.micronaut.http.client.HttpClient
+import io.micronaut.http.client.annotation.Client
+import io.micronaut.test.extensions.junit5.annotation.MicronautTest
+import io.mockk.every
+import io.mockk.mockk
+import jakarta.inject.Inject
+import org.junit.jupiter.api.Assertions
+import org.junit.jupiter.api.BeforeAll
+import org.junit.jupiter.api.Test
+import org.junit.jupiter.api.TestInstance
+import java.time.OffsetDateTime
+import java.time.ZoneOffset
+import java.util.UUID
+
+@TestInstance(TestInstance.Lifecycle.PER_CLASS)
+@MicronautTest
+internal class UserApiControllerTest {
+  @Inject
+  lateinit var context: ApplicationContext
+
+  lateinit var userHandler: UserHandler
+
+  @Inject
+  @Client("/")
+  lateinit var client: HttpClient
+
+  @BeforeAll
+  fun setupMock() {
+    userHandler = mockk()
+    context.registerSingleton(UserHandler::class.java, userHandler)
+  }
+
+  @Test
+  fun testGetUser() {
+    every { userHandler.getUser(any()) } returns UserRead()
+
+    val path = "/api/v1/users/get"
+    assertStatus(HttpStatus.OK, client.status(HttpRequest.POST(path, UserIdRequestBody())))
+  }
+
+  @Test
+  fun testGetUserByAuthId() {
+    every { userHandler.getUserByAuthId(any()) } returns UserRead()
+
+    val path = "/api/v1/users/get_by_auth_id"
+    assertStatus(HttpStatus.OK, client.status(HttpRequest.POST(path, UserAuthIdRequestBody())))
+  }
+
+  @Test
+  fun testGetUserByEmail() {
+    every { userHandler.getUserByEmail(any()) } returns UserRead()
+
+    val path = "/api/v1/users/get_by_email"
+    assertStatus(HttpStatus.OK, client.status(HttpRequest.POST(path, UserEmailRequestBody())))
+  }
+
+  @Test
+  fun testDeleteUser() {
+    every { userHandler.deleteUser(any()) } returns Unit
+
+    val path = "/api/v1/users/delete"
+    assertStatus(HttpStatus.OK, client.status(HttpRequest.POST(path, UserIdRequestBody())))
+  }
+
+  @Test
+  fun testUpdateUser() {
+    every { userHandler.updateUser(any()) } returns UserRead()
+
+    val path = "/api/v1/users/update"
+    assertStatus(HttpStatus.OK, client.status(HttpRequest.POST(path, UserUpdate())))
+  }
+
+  @Test
+  fun testListUsersInOrganization() {
+    every { userHandler.listUsersInOrganization(any()) } returns OrganizationUserReadList()
+
+    val path = "/api/v1/users/list_by_organization_id"
+    assertStatus(HttpStatus.OK, client.status(HttpRequest.POST(path, OrganizationIdRequestBody())))
+  }
+
+  @Test
+  fun testListInstanceAdminUsers() {
+    every { userHandler.listInstanceAdminUsers() } returns UserWithPermissionInfoReadList()
+
+    val path = "/api/v1/users/list_instance_admin"
+    assertStatus(HttpStatus.OK, client.status(HttpRequest.POST(path, Jsons.emptyObject())))
+  }
+
+  @Test
+  fun testGetOrCreateUser() {
+    every { userHandler.getOrCreateUserByAuthId(any()) } returns UserGetOrCreateByAuthIdResponse().userRead(UserRead())
+
+    val path = "/api/v1/users/get_or_create_by_auth_id"
+    assertStatus(HttpStatus.OK, client.status(HttpRequest.POST(path, UserAuthIdRequestBody())))
+  }
+
+  @Test
+  fun testListAccessInfoByWorkspaceId() {
+    every { userHandler.listAccessInfoByWorkspaceId(any()) } returns WorkspaceUserAccessInfoReadList()
+
+    val path = "/api/v1/users/list_access_info_by_workspace_id"
+    assertStatus(HttpStatus.OK, client.status(HttpRequest.POST(path, Jsons.serialize(WorkspaceIdRequestBody()))))
+  }
+
+  @Test
+  fun testAgenticEnabledAtSerializesAsIsoString() {
+    val agenticEnabledAt = OffsetDateTime.of(2026, 2, 5, 12, 0, 0, 0, ZoneOffset.UTC)
+    val userRead =
+      UserRead()
+        .userId(UUID.randomUUID())
+        .email("test@test.com")
+        .name("test")
+        .agenticEnabledAt(agenticEnabledAt)
+
+    every { userHandler.getUser(any()) } returns userRead
+
+    val path = "/api/v1/users/get"
+    val response = client.toBlocking().retrieve(HttpRequest.POST(path, UserIdRequestBody()), String::class.java)
+
+    // Verify the response contains an ISO-8601 date string, not a numeric timestamp
+    Assertions.assertTrue(response.contains("2026-02-05T12:00:00"), "agenticEnabledAt should be serialized as ISO-8601 string, got: $response")
+    Assertions.assertFalse(response.contains("\"agenticEnabledAt\":1"), "agenticEnabledAt should not be a numeric timestamp, got: $response")
+  }
+}

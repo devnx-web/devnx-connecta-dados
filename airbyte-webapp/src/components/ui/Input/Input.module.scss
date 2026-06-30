@@ -1,0 +1,113 @@
+@use "scss/colors";
+@use "scss/variables";
+
+.container {
+  height: variables.$form-input-height;
+  width: 100%;
+  position: relative;
+  border: variables.$border-thin solid colors.$grey-200;
+  border-radius: variables.$border-radius-sm;
+  display: flex;
+  align-items: stretch;
+
+  &.light {
+    background-color: colors.$foreground;
+    border: variables.$border-thin solid colors.$grey-100;
+
+    &.inline {
+      border-right-width: 0;
+      border-left-width: 0;
+      border-radius: 0;
+    }
+  }
+
+  &.error {
+    border-color: colors.$red-200;
+  }
+
+  &.disabled,
+  &.readOnly {
+    cursor: not-allowed;
+    border-color: colors.$grey-100;
+  }
+
+  &:focus-within {
+    border-color: colors.$blue;
+
+    &.light {
+      background-color: colors.$foreground;
+    }
+  }
+
+  &:not(.disabled, .readOnly, :focus-within):hover {
+    border-color: colors.$grey-300;
+
+    &.light {
+      background-color: colors.$foreground;
+    }
+
+    &.error {
+      border-color: colors.$red;
+    }
+  }
+}
+
+$input-horizontal-padding: variables.$spacing-md;
+$icon-width: 20px;
+
+/** The icon is positioned absolute so that it is within the bounds of the input. Other components like our ComboBox
+ * rely on the input width to position popovers, so it's important that the icon is within the input. **/
+.icon {
+  position: absolute;
+  top: 0;
+  left: 0;
+  height: 100%;
+  width: ($input-horizontal-padding * 2) + $icon-width;
+  pointer-events: none;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  padding-inline: $input-horizontal-padding;
+}
+
+.input {
+  outline: none;
+  width: 100%;
+  padding: 7px $input-horizontal-padding;
+  font-size: variables.$font-size-md;
+  font-weight: normal;
+  border: none;
+  background: none;
+  color: colors.$dark-blue;
+  caret-color: colors.$blue-700;
+
+  &:not(.disabled).password {
+    width: calc(100% - 22px);
+  }
+
+  &::placeholder {
+    color: colors.$grey-300;
+  }
+
+  &.disabled,
+  &.readOnly {
+    pointer-events: none;
+    color: colors.$grey-300;
+  }
+
+  &--hasIcon {
+    padding-left: calc(2 * $input-horizontal-padding + $icon-width);
+  }
+}
+
+button.visibilityButton {
+  position: absolute;
+  right: 0;
+  top: 0;
+  display: flex;
+  height: 100%;
+  width: 40px;
+  align-items: center;
+  justify-content: center;
+  border: none;
+}

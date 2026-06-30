@@ -1,0 +1,14 @@
+@use "scss/colors";
+@use "scss/variables";
+
+.filterButton {
+  background-color: colors.$foreground;
+  border-radius: variables.$border-radius-sm;
+  border: variables.$border-thin solid colors.$grey-300;
+  min-height: auto;
+  height: variables.$button-height-xs;
+}
+
+.filterOption {
+  white-space: nowrap;
+}

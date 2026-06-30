@@ -1,0 +1,60 @@
+@use "scss/colors";
+@use "scss/mixins";
+@use "scss/variables";
+@use "scss/z-indices";
+
+$card-header-fixed-height: 77px;
+
+.cardHeader {
+  position: sticky;
+  top: calc(-1 * variables.$spacing-xl);
+  height: $card-header-fixed-height;
+  z-index: z-indices.$tableStickyHeader;
+  border-bottom: variables.$border-thin solid colors.$grey-100;
+  background-color: colors.$foreground;
+  border-top-left-radius: variables.$border-radius-lg;
+  border-top-right-radius: variables.$border-radius-lg;
+}
+
+.search {
+  flex-basis: 400px;
+}
+
+.tableContainer {
+  .table thead {
+    // remove gap in sticky table header since it respects the padding of its containing block
+    top: calc(-1 * variables.$spacing-xl + $card-header-fixed-height);
+  }
+
+  .syncing {
+    background: colors.$grey-50;
+  }
+
+  .statusHeader {
+    width: 0;
+  }
+
+  .statusCell {
+    white-space: nowrap;
+  }
+
+  .actionsHeader {
+    width: 50px;
+  }
+
+  .nameContent {
+    word-break: break-all;
+  }
+
+  .latestSyncHeader {
+    width: 25%;
+  }
+
+  .dataFreshAsOfHeader {
+    width: 20%;
+  }
+
+  .row:hover {
+    background-color: colors.$foreground;
+  }
+}

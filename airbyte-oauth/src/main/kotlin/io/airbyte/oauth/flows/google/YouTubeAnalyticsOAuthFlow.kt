@@ -1,0 +1,26 @@
+/*
+ * Copyright (c) 2020-2026 Airbyte, Inc., all rights reserved.
+ */
+
+package io.airbyte.oauth.flows.google
+
+import io.airbyte.commons.annotation.InternalForTesting
+import java.net.http.HttpClient
+import java.util.function.Supplier
+
+/**
+ * YouTube Analytics OAuth.
+ */
+class YouTubeAnalyticsOAuthFlow : GoogleOAuthFlow {
+  constructor(httpClient: HttpClient) : super(httpClient)
+
+  @InternalForTesting
+  internal constructor(httpClient: HttpClient, stateSupplier: Supplier<String>) : super(httpClient, stateSupplier)
+
+  override fun getScope(): String = SCOPE_URL
+
+  companion object {
+    private const val SCOPE_URL =
+      "https://www.googleapis.com/auth/yt-analytics.readonly https://www.googleapis.com/auth/yt-analytics-monetary.readonly"
+  }
+}

@@ -1,0 +1,318 @@
+plugins {
+  id("io.airbyte.gradle.jvm.app")
+  id("io.airbyte.gradle.docker")
+  id("io.airbyte.gradle.publish")
+  id("io.airbyte.gradle.kube-reload")
+}
+
+dependencies {
+  ksp(platform(libs.micronaut.platform))
+  ksp(libs.bundles.micronaut.annotation.processor)
+  ksp(libs.micronaut.jaxrs.processor)
+  ksp(project(":oss:airbyte-configuration-processor"))
+
+  implementation(platform(libs.micronaut.platform))
+  implementation(libs.bundles.micronaut)
+  implementation(libs.bundles.micronaut.cache)
+  implementation(libs.bundles.micronaut.data.jdbc)
+  implementation(libs.bundles.micronaut.metrics)
+  implementation(libs.bundles.micronaut.jaxrs)
+  implementation(libs.micronaut.http)
+  implementation(libs.jakarta.ws.rs.api)
+  implementation(libs.micronaut.security)
+  implementation(libs.micronaut.security.jwt)
+  implementation(libs.bundles.flyway)
+  implementation(libs.s3)
+  implementation(libs.sts)
+  implementation(libs.aws.java.sdk.s3)
+  implementation(libs.aws.java.sdk.sts)
+  implementation(libs.reactor.core)
+  implementation(libs.temporal.sdk)
+  implementation(libs.sentry.java)
+  implementation(libs.swagger.annotations)
+  implementation(libs.google.cloud.storage)
+  implementation(libs.cron.utils)
+  implementation(libs.jakarta.ws.rs.api)
+  implementation(libs.jakarta.validation.api)
+  implementation(libs.kotlin.logging)
+  implementation(libs.kubernetes.client)
+
+  implementation(project(":oss:airbyte-analytics"))
+  implementation(project(":oss:airbyte-api:problems-api"))
+  implementation(project(":oss:airbyte-api:public-api"))
+  implementation(project(":oss:airbyte-api:server-api"))
+  implementation(project(":oss:airbyte-api:workload-api"))
+  implementation(project(":oss:airbyte-workload-api-server"))
+  implementation(project(":oss:airbyte-audit-logging"))
+  implementation(project(":oss:airbyte-commons"))
+  implementation(project(":oss:airbyte-commons-auth"))
+  implementation(project(":oss:airbyte-commons-converters"))
+  implementation(project(":oss:airbyte-commons-entitlements"))
+  implementation(project(":oss:airbyte-commons-license"))
+  implementation(project(":oss:airbyte-commons-micronaut"))
+  implementation(project(":oss:airbyte-commons-micronaut-security"))
+  implementation(project(":oss:airbyte-commons-storage"))
+  implementation(project(":oss:airbyte-commons-temporal"))
+  implementation(project(":oss:airbyte-commons-temporal-core"))
+  implementation(project(":oss:airbyte-commons-server"))
+  implementation(project(":oss:airbyte-commons-with-dependencies"))
+  implementation(project(":oss:airbyte-commons-workload"))
+  implementation(project(":oss:airbyte-domain:services"))
+  implementation(project(":oss:airbyte-domain:models"))
+  implementation(project(":oss:airbyte-config:init"))
+  implementation(project(":oss:airbyte-config:config-models"))
+  implementation(project(":oss:airbyte-config:config-persistence"))
+  implementation(project(":oss:airbyte-config:config-secrets"))
+  implementation(project(":oss:airbyte-config:specs"))
+  implementation(project(":oss:airbyte-statistics"))
+  implementation(project(":oss:airbyte-worker-models"))
+
+  // TODO airybte-server should not depend directly on airbyte-data. All data access should go through airbyte-domain.
+  implementation(project(":oss:airbyte-data"))
+
+  implementation(project(":oss:airbyte-featureflag"))
+  implementation(project(":oss:airbyte-mappers"))
+  implementation(project(":oss:airbyte-metrics:metrics-lib"))
+  implementation(project(":oss:airbyte-db:db-lib"))
+  implementation(project(":oss:airbyte-db:jooq"))
+  implementation(project(":oss:airbyte-json-validation"))
+  implementation(project(":oss:airbyte-mappers"))
+  implementation(project(":oss:airbyte-notification"))
+  implementation(project(":oss:airbyte-oauth"))
+  implementation(libs.airbyte.protocol)
+  implementation(project(":oss:airbyte-persistence:job-persistence"))
+
+  runtimeOnly(libs.snakeyaml)
+  runtimeOnly(libs.javax.databind)
+  runtimeOnly(libs.bundles.logback)
+
+  // Required for local database secret hydration)
+  runtimeOnly(libs.hikaricp)
+  runtimeOnly(libs.h2.database)
+
+  kspTest(platform(libs.micronaut.platform))
+  kspTest(libs.bundles.micronaut.annotation.processor)
+  kspTest(libs.micronaut.jaxrs.processor)
+  kspTest(libs.bundles.micronaut.test.annotation.processor)
+
+  testImplementation(libs.bundles.micronaut.test)
+  testImplementation(project(":oss:airbyte-test-utils"))
+  testImplementation(libs.postgresql)
+  testImplementation(libs.platform.testcontainers.postgresql)
+  testImplementation(libs.mockwebserver)
+  testImplementation(libs.reactor.test)
+  testImplementation(libs.bundles.junit)
+  testImplementation(libs.bundles.kotest)
+  testImplementation(libs.assertj.core)
+  testImplementation(libs.junit.pioneer)
+  testImplementation(libs.mockk)
+  testImplementation(libs.micronaut.http.client)
+
+  testRuntimeOnly(libs.junit.jupiter.engine)
+}
+
+// we want to be able to access the generated db files from config/init when we build the server docker image.)
+val copySeed =
+  tasks.register<Copy>("copySeed") {
+    from("${project(":oss:airbyte-config:init").layout.buildDirectory.get()}/resources/main/config")
+    into("${project.layout.buildDirectory.get()}/config_init/resources/main/config")
+    dependsOn(project(":oss:airbyte-config:init").tasks.named("processResources"))
+  }
+
+val cleanWebapp =
+  tasks.register<Delete>("cleanWebapp") {
+    delete("${project.layout.projectDirectory}/src/main/resources/webapp")
+  }
+
+// Will be true if the webapp should be built, false otherwise.
+// This is determined by caching the last known `oss/airbyte-webapp` git-ref into `build/webapp.hash`.
+// If the current git-ref of `oss/airbyte-webapp` is different from the cached git-ref,
+// or if `oss/airbyte-webapp` has uncommitted changes, then the webapp will be built.
+val shouldBuildWebapp: Boolean by lazy {
+  val webappHashPrevious = buildFileContents("webapp.hash")
+  val webappHashCurrent = dirGitRef("oss/airbyte-webapp")
+
+  val openApiHashPrevious = buildFileContents("openapi.hash")
+  val openApiHashCurrent = dirGitRef("oss/airbyte-api/server-api/src/main/openapi")
+
+  // The directory where the webapp code is copied into
+  val webappDir = File("${project.layout.projectDirectory}/src/main/resources/webapp")
+
+  var reason = "not-applicable"
+
+  val shouldBuild =
+    when {
+      // if the webap directory doesn't exist, build the webapp
+      !webappDir.exists() || webappDir.listFiles()?.isEmpty() == true -> {
+        reason = "webapp directory doesn't exist or is empty"
+        true
+      }
+      // if `buildWebapp` is explicitly called, build the webapp
+      gradle.startParameter.taskNames.any { it.contains("buildWebapp") } -> {
+        reason = "buildWebapp task is explicitly called"
+        true
+      }
+      // if the webapp.hash file doesn't exist, build the webapp (and create the file)
+      !webappHashPrevious.exists() || !openApiHashPrevious.exists() -> {
+        webappHashPrevious.writeText(webappHashCurrent)
+        openApiHashPrevious.writeText(openApiHashCurrent)
+        reason = "webapp.hash or openapi.hash file doesn't exist"
+        true
+      }
+      // if the current hash is "dirty" (uncommitted changes), built the webapp
+      webappHashCurrent == "dirty" || openApiHashCurrent == "dirty" -> {
+        reason = "webapp or openapi directory has uncommitted changes"
+        true
+      }
+      // if the current hash is different from the previous hash, build the webapp and write the new hash
+      webappHashPrevious.readText() != webappHashCurrent || openApiHashPrevious.readText() != openApiHashCurrent -> {
+        webappHashPrevious.writeText(webappHashCurrent)
+        openApiHashPrevious.writeText(openApiHashCurrent)
+        reason = "webapp or openapi directory has committed changes"
+        true
+      }
+      // if we're here, don't build the webapp
+      else -> false
+    }
+
+  shouldBuild.also { println("shouldBuildWebapp: $it ($reason)") }
+}
+
+val buildWebapp =
+  tasks.register<Copy>("buildWebapp") {
+    from("${project(":oss:airbyte-webapp").layout.buildDirectory.get()}/app")
+    into("${project.layout.projectDirectory}/src/main/resources/webapp")
+
+    onlyIf {
+      shouldBuildWebapp
+    }
+
+    doFirst {
+      val src = "${project(":oss:airbyte-webapp").layout.buildDirectory.get()}/app"
+      if (!file(src).exists()) {
+        throw GradleException("source file $src does not exist")
+      }
+    }
+
+    if (shouldBuildWebapp) {
+      dependsOn(
+        // Always clean out the webapp assets before writing new ones,
+        // because the file names contain a hash, so assets will pile up
+        // over time.
+        cleanWebapp,
+        project(":oss:airbyte-webapp").tasks.named("pnpmBuild"),
+        "spotlessStyling",
+      )
+    }
+  }
+
+tasks.named("assemble") {
+  if (shouldBuildWebapp) {
+    dependsOn(buildWebapp)
+  }
+}
+
+// need to make sure that the files are in the resource directory before copying.)
+// tests require the seed to exist.)
+tasks.named("test") {
+  dependsOn(copySeed)
+}
+tasks.named("processResources") {
+  if (shouldBuildWebapp) {
+    dependsOn(buildWebapp)
+  }
+}
+tasks.named("assemble") {
+  dependsOn(copySeed)
+}
+
+airbyte {
+  application {
+    mainClass = "io.airbyte.server.ApplicationKt"
+
+    localEnvVars.putAll(
+      mapOf(
+        "AIRBYTE_VERSION" to "dev",
+        "DATABASE_USER" to "docker",
+        "DATABASE_PASSWORD" to "docker",
+        "CONFIG_DATABASE_USER" to "docker",
+        "CONFIG_DATABASE_PASSWORD" to "docker",
+        // we map the docker pg db to port 5433 so it does not conflict with other pg instances.
+        "DATABASE_URL" to "jdbc:postgresql://localhost:5433/airbyte",
+        "CONFIG_DATABASE_URL" to "jdbc:postgresql://localhost:5433/airbyte",
+        "RUN_DATABASE_MIGRATION_ON_STARTUP" to "true",
+        "WORKSPACE_ROOT" to "/tmp/workspace",
+        "CONFIG_ROOT" to "/tmp/airbyte_config",
+        "TRACKING_STRATEGY" to "logging",
+        "TEMPORAL_HOST" to "localhost:7233",
+        "MICRONAUT_ENVIRONMENTS" to "control-plane",
+      ),
+    )
+  }
+
+  docker {
+    imageName = "server"
+  }
+
+  kubeReload {
+    deployment = "ab-server"
+    container = "airbyte-server-container"
+  }
+}
+
+tasks.named<Test>("test") {
+  environment(
+    mapOf(
+      "AIRBYTE_VERSION" to "dev",
+      "MICRONAUT_ENVIRONMENTS" to "test",
+      "SERVICE_NAME" to project.name,
+    ),
+  )
+}
+
+// The DuplicatesStrategy will be required while this module is mixture of kotlin and java dependencies.
+// Once the code has been migrated to kotlin, this can also be removed.
+tasks.withType<Jar>().configureEach {
+  duplicatesStrategy = DuplicatesStrategy.EXCLUDE
+}
+
+/**
+ * Returns the git-ref of the [dir] directory, or `dirty` if there are uncommitted changes.
+ * The uncommitted changes only apply to tracked files.
+ */
+fun dirGitRef(dir: String): String {
+  val statusOutput =
+    project.providers
+      .exec {
+        commandLine("git", "status", "--porcelain", "--untracked-files=no", dir)
+        isIgnoreExitValue = true
+      }.standardOutput.asText
+      .get()
+      .trim()
+
+  return if (statusOutput.isNotEmpty()) {
+    "dirty"
+  } else {
+    project.providers
+      .exec {
+        commandLine("git", "log", "-1", "--format=%H", "--", dir)
+        isIgnoreExitValue = true
+      }.standardOutput.asText
+      .get()
+      .trim()
+      .ifEmpty { "dirty" }
+  }
+}
+
+/**
+ * Returns a [File] of the [file] from the project's build directory.
+ *
+ * Creates the pathway to the file if it does not exist. This is to ensure that gradle is happy when looking for this file.
+ */
+fun buildFileContents(file: String): File =
+  File(
+    project.layout.buildDirectory
+      .get()
+      .asFile,
+    file,
+  ).also { it.parentFile.mkdirs() }

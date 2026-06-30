@@ -1,0 +1,30 @@
+@use "scss/colors";
+@use "scss/variables";
+@use "scss/z-indices";
+
+.listboxOptions {
+  width: variables.$min-width-listbox-options-list;
+  border-radius: variables.$border-radius-lg;
+  box-shadow: variables.$box-shadow-menu;
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  background: colors.$foreground;
+  max-height: variables.$height-long-listbox-options-list;
+  overflow: auto;
+  z-index: z-indices.$dropdownMenu;
+
+  // remove default browser styles for ul
+  margin-block-start: 0;
+  margin-block-end: 0;
+  padding-inline-start: 0;
+
+  &:focus-visible {
+    outline: none;
+  }
+
+  &--adaptiveWidth {
+    /** --button-width is a variable exposed by headless-ui */
+    width: var(--button-width);
+  }
+}

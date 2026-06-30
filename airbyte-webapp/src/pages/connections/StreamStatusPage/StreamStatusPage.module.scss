@@ -1,0 +1,8 @@
+@use "scss/variables";
+
+.container {
+  grid-area: connection-page-content;
+  display: flex;
+  gap: variables.$spacing-md;
+  flex-direction: column;
+}

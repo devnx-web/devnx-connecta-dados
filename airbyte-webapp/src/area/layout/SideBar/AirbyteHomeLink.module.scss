@@ -1,0 +1,23 @@
+@use "scss/colors";
+@use "scss/variables";
+
+.homeLink {
+  width: 100%;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: variables.$spacing-sm;
+  padding: variables.$spacing-sm variables.$spacing-md;
+  height: variables.$height-breadcrumb;
+
+  &__link {
+    display: flex;
+  }
+
+  &__logo {
+    display: block;
+    width: 112px;
+    max-width: 100%;
+    height: auto;
+  }
+}

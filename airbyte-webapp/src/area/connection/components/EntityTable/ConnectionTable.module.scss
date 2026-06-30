@@ -1,0 +1,38 @@
+@use "scss/variables";
+
+.connectionName {
+  width: 25%;
+}
+
+.width25 {
+  width: 25%;
+}
+
+.lastSync {
+  width: 10%;
+}
+
+.enabled {
+  width: 1%;
+}
+
+.connectionSettings {
+  width: 1%;
+}
+
+.tags {
+  width: 20%;
+}
+
+.connectionsTable {
+  min-width: variables.$min-width-wide-table-container;
+
+  th:nth-child(1) {
+    padding-left: 45px;
+  }
+}
+
+.cellContent {
+  padding: variables.$spacing-md variables.$spacing-lg;
+  display: block;
+}

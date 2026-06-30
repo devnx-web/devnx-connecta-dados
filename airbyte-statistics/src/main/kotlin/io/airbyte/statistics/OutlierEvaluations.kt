@@ -1,0 +1,350 @@
+/*
+ * Copyright (c) 2020-2026 Airbyte, Inc., all rights reserved.
+ */
+
+package io.airbyte.statistics
+
+import java.math.BigDecimal
+import kotlin.math.absoluteValue
+import kotlin.math.max
+import kotlin.math.min
+import kotlin.math.sqrt
+
+/**
+ * The Result of an outlier evaluation.
+ */
+data class OutlierEvaluation(
+  val name: String,
+  val value: Double,
+  val threshold: Double,
+  val isOutlier: Boolean,
+  val scores: Scores?,
+  val skipped: Boolean? = null,
+)
+
+/**
+ * Define a rule to determine outliers.
+ *
+ * @param name the name of the rule.
+ * @param value the value to evaluate.
+ * @param operator the operator to use to compare the evaluated value to the threshold.
+ * @param threshold the threshold to use to compare the evaluated value to.
+ * @param debugScores optional dimension to use for debugging context. If not provided, will attempt to infer from the value expression.
+ * @param condition optional condition that must be met for the rule to be evaluated. If null or evaluates to 0.0, the rule is skipped.
+ */
+data class OutlierRule(
+  val name: String,
+  val value: Expression,
+  val operator: ComparisonOperator,
+  val threshold: Expression,
+  val debugScores: Dimension? = null,
+  val condition: Expression? = null,
+) {
+  fun evaluate(sc: ScoringContext): OutlierEvaluation? {
+    var skipped: Boolean? = null
+
+    // Check condition first
+    if (condition != null) {
+      val conditionMet = condition.getValue(sc)?.takeIf { it != 0.0 } != null
+      if (!conditionMet) {
+        return null
+      }
+      skipped = false
+    }
+
+    val v = value.getValue(sc)
+    val t = threshold.getValue(sc)
+    val scores = debugScores?.getScores(sc) ?: value.getScores(sc)
+    return if (v != null && t != null) {
+      OutlierEvaluation(
+        name = name,
+        value = v,
+        threshold = t,
+        isOutlier = operator.compare(v, t),
+        scores = scores,
+        skipped = skipped,
+      )
+    } else {
+      null
+    }
+  }
+}
+
+/**
+ * Define a rule to compute a derived statistic from existing metrics.
+ *
+ * Derived stats are computed before statistical scoring and can be used in outlier rules.
+ *
+ * @param name the name of the derived stat (will be added to additionalStats)
+ * @param value the expression to compute the derived value
+ */
+data class DerivedStatRule(
+  val name: String,
+  val value: Expression,
+) {
+  /**
+   * Compute the derived stat from a raw value context.
+   * Returns null if the condition is false or if the value cannot be computed.
+   *
+   * @param context A ScoringContext containing raw metric values (before statistical scoring)
+   * @return The computed derived stat value, or null if it cannot be computed
+   */
+  fun compute(context: ScoringContext): BigDecimal? {
+    // Compute the derived value
+    val result = value.getValue(context) ?: return null
+    // Return null if the result is not finite (infinity or NaN)
+    if (!result.isFinite()) return null
+    return BigDecimal.valueOf(result)
+  }
+}
+
+/**
+ * Comparison operators used for OutlierRules.
+ */
+sealed interface ComparisonOperator {
+  fun compare(
+    lhs: Double,
+    rhs: Double,
+  ): Boolean
+}
+
+object GreaterThan : ComparisonOperator {
+  override fun compare(
+    lhs: Double,
+    rhs: Double,
+  ): Boolean = lhs > rhs
+}
+
+object LessThan : ComparisonOperator {
+  override fun compare(
+    lhs: Double,
+    rhs: Double,
+  ): Boolean = lhs < rhs
+}
+
+object GreaterThanOrEqual : ComparisonOperator {
+  override fun compare(
+    lhs: Double,
+    rhs: Double,
+  ): Boolean = lhs >= rhs
+}
+
+object LessThanOrEqual : ComparisonOperator {
+  override fun compare(
+    lhs: Double,
+    rhs: Double,
+  ): Boolean = lhs <= rhs
+}
+
+/**
+ * Comparison expression that evaluates to 1.0 if true, 0.0 if false.
+ * Used for conditional rule evaluation.
+ */
+data class Comparison(
+  val lhs: Expression,
+  val rhs: Expression,
+  val operator: ComparisonOperator,
+) : Expression {
+  override fun getValue(sc: ScoringContext): Double? {
+    val lhsValue = lhs.getValue(sc) ?: return null
+    val rhsValue = rhs.getValue(sc) ?: return null
+    return if (operator.compare(lhsValue, rhsValue)) 1.0 else 0.0
+  }
+}
+
+/**
+ * Convenience aliasing
+ */
+typealias ScoringContext = Map<String, Scores>
+
+/**
+ * Base interface of an expression tree.
+ *
+ * We use this to represent the Dimension lookup as well as the arithmetic operations required on the value before it can be evaluated.
+ */
+sealed interface Expression {
+  /**
+   * Returns the value of the expression.
+   */
+  fun getValue(sc: ScoringContext): Double?
+
+  /**
+   * Returns the most relevant scores for the expression. Typically, for debugging the scoring.
+   */
+  fun getScores(sc: ScoringContext): Scores? = null
+}
+
+/**
+ * A Constant expression.
+ */
+data class Const(
+  val value: Double,
+) : Expression {
+  override fun getValue(sc: ScoringContext): Double = value
+}
+
+/**
+ * Represent a dimension.
+ *
+ * A dimension refers to a dimension of the [ScoringContext] by name.
+ * Those dimensions have pre-computed statistical values associated with them.
+ *
+ * @param name the name of the dimension.
+ * @param f the statistical function to read to the dimension.
+ */
+data class Dimension(
+  val name: String,
+  val f: StatisticalFunction = StatisticalFunction.IDENTITY,
+) : Expression {
+  enum class StatisticalFunction {
+    IDENTITY,
+    MEAN,
+    STD,
+    ZSCORE,
+  }
+
+  override fun getValue(sc: Map<String, Scores>): Double? =
+    sc[name]?.let { scores ->
+      when (f) {
+        StatisticalFunction.IDENTITY -> scores.current
+        StatisticalFunction.MEAN -> scores.mean
+        StatisticalFunction.STD -> scores.std
+        StatisticalFunction.ZSCORE -> scores.zScore
+      }
+    }
+
+  override fun getScores(sc: Map<String, Scores>): Scores? = sc[name]
+}
+
+/**
+ * Defines an operator to combine two expressions.
+ */
+data class Operator(
+  val lhs: Expression,
+  val rhs: Expression,
+  val type: Type,
+) : Expression {
+  enum class Type {
+    Divide,
+    Minus,
+    Plus,
+    Times,
+  }
+
+  override fun getValue(sc: Map<String, Scores>): Double? {
+    val lhsValue = lhs.getValue(sc) ?: return null
+    val rhsValue = rhs.getValue(sc) ?: return null
+    return when (type) {
+      Type.Divide -> lhsValue / rhsValue
+      Type.Minus -> lhsValue - rhsValue
+      Type.Plus -> lhsValue + rhsValue
+      Type.Times -> lhsValue * rhsValue
+    }
+  }
+}
+
+sealed interface Function : Expression {
+  val value: Expression
+
+  fun apply(value: Double): Double
+
+  override fun getValue(sc: ScoringContext): Double? = value.getValue(sc)?.let { apply(it) }
+
+  override fun getScores(sc: ScoringContext): Scores? = value.getScores(sc)
+}
+
+/**
+ * Returns the absolute value of the expression.
+ */
+data class Abs(
+  override val value: Expression,
+) : Function {
+  override fun apply(value: Double): Double = value.absoluteValue
+}
+
+/**
+ * 1+(1/x)
+ *
+ * Returns a coefficient to adjust the outlier threshold. The intent is to increase the thresholds for connections that
+ * generally run faster.
+ * The desired function has a high enough value for f(0) and should converge towards 1 as x goes towards infinity
+ */
+data class Reciprocal(
+  override val value: Expression,
+) : Function {
+  override fun getValue(sc: ScoringContext): Double {
+    // Ensures we always provide a value, also put a floor on it to avoid arbitrarily high thresholds.
+    // f(0.01) being 101
+    val value = value.getValue(sc)
+    return apply(if (value == null || value < 0.01) 0.01 else value)
+  }
+
+  override fun apply(value: Double): Double = 1.0 + (1.0 / value)
+}
+
+/**
+ * 1+(1/sqrt(x))
+ *
+ * Returns a coefficient to adjust the outlier threshold. The intent is to increase the thresholds for connections with
+ *  a lower volume of data.
+ * The desired function has a high enough value for f(0) and should converge towards 1 as x goes towards infinity
+ */
+data class ReciprocalSqrt(
+  override val value: Expression,
+) : Function {
+  override fun getValue(sc: ScoringContext): Double {
+    // Ensures we always provide a value, also put a floor on it to avoid arbitrarily high thresholds.
+    // f(0.01) being 11
+    val value = value.getValue(sc)
+    return apply(if (value == null || value < 0.01) 0.01 else value)
+  }
+
+  override fun apply(value: Double): Double = 1.0 + (1.0 / sqrt(value))
+}
+
+/**
+ * Binary function interface for operations that take two expressions.
+ */
+sealed interface BinaryFunction : Expression {
+  val left: Expression
+  val right: Expression
+
+  fun apply(
+    left: Double,
+    right: Double,
+  ): Double
+
+  override fun getValue(sc: ScoringContext): Double? {
+    val leftValue = left.getValue(sc) ?: return null
+    val rightValue = right.getValue(sc) ?: return null
+    return apply(leftValue, rightValue)
+  }
+
+  override fun getScores(sc: ScoringContext): Scores? = null
+}
+
+/**
+ * Returns the minimum of two expressions.
+ */
+data class Min(
+  override val left: Expression,
+  override val right: Expression,
+) : BinaryFunction {
+  override fun apply(
+    left: Double,
+    right: Double,
+  ): Double = min(left, right)
+}
+
+/**
+ * Returns the maximum of two expressions.
+ */
+data class Max(
+  override val left: Expression,
+  override val right: Expression,
+) : BinaryFunction {
+  override fun apply(
+    left: Double,
+    right: Double,
+  ): Double = max(left, right)
+}

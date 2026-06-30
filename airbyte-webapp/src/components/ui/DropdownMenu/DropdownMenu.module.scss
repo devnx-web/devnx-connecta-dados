@@ -1,0 +1,66 @@
+@use "scss/colors";
+@use "scss/variables";
+@use "scss/z-indices";
+
+.items {
+  z-index: z-indices.$dropdownMenu;
+  overflow: auto;
+  max-height: 300px;
+  outline: none;
+  border-radius: variables.$border-radius-md;
+  background-color: colors.$foreground;
+  box-shadow: variables.$box-shadow-menu;
+
+  &:focus-within {
+    outline: none;
+  }
+}
+
+.separator {
+  border-bottom: variables.$border-thin solid colors.$grey-100;
+  margin: variables.$spacing-xs variables.$spacing-xs;
+}
+
+.item {
+  cursor: pointer;
+  display: flex;
+  gap: variables.$spacing-md;
+  align-items: center;
+  width: 100%;
+  padding: variables.$spacing-md variables.$spacing-lg;
+  border: 0;
+  background-color: transparent;
+  text-decoration: none;
+
+  .icon {
+    display: flex;
+    align-items: center;
+    color: colors.$dark-blue;
+    flex-shrink: 0;
+  }
+
+  .text {
+    width: 100%;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    text-align: left;
+  }
+
+  &.focus {
+    background-color: colors.$blue-50;
+  }
+
+  &.disabled {
+    cursor: not-allowed;
+    opacity: 0.25;
+  }
+
+  &.iconPositionRight {
+    flex-direction: row-reverse;
+  }
+
+  &.iconPositionLeft {
+    flex-direction: row;
+  }
+}

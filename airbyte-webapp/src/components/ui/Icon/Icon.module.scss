@@ -1,0 +1,97 @@
+@use "sass:map";
+@use "scss/variables";
+@use "scss/colors";
+@use "scss/mixins";
+
+@keyframes spinning {
+  from {
+    transform: rotate(0deg);
+  }
+
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+$colorMap: (
+  "primary": (
+    color: colors.$blue,
+  ),
+  "disabled": (
+    color: colors.$grey,
+  ),
+  "action": (
+    color: colors.$grey,
+  ),
+  "success": (
+    color: colors.$green,
+  ),
+  "error": (
+    color: colors.$red,
+  ),
+  "warning": (
+    color: colors.$yellow,
+  ),
+  "affordance": (
+    color: colors.$dark-blue,
+  ),
+  "foreground": (
+    color: colors.$foreground,
+  ),
+  "magic": (
+    // Note: The icon must support a gradient
+    // so we fallback to the start color
+    color: colors.$gradient-primary-start,
+    --start-color: #{colors.$gradient-primary-start},
+    --stop-color: #{colors.$gradient-primary-stop},
+  ),
+);
+
+$iconClassname: "icon";
+
+.#{$iconClassname} {
+  display: inline-block;
+
+  &.#{$iconClassname}--spinning {
+    animation: spinning 1.5s linear 0s infinite;
+  }
+
+  &.#{$iconClassname}--withBackground {
+    color: colors.$foreground;
+    box-sizing: content-box;
+    border-radius: variables.$border-radius-pill;
+    padding: 4px;
+    background-color: colors.$inverse; // default if color isn't specified
+  }
+
+  @each $name, $rules in $colorMap {
+    &--#{$name} {
+      @each $property, $value in $rules {
+        #{$property}: $value;
+      }
+
+      &.#{$iconClassname}--withBackground {
+        background-color: map.get($rules, color);
+      }
+    }
+  }
+}
+
+$sizes:
+  "xs" 12px -6% -30%,
+  "sm" 16px -18% -35%,
+  "md" 20px -28% -42%,
+  "lg" 24px -40% -58%,
+  "xl" 28px -50% -69%;
+
+@each $name, $size, $verticalAlign, $verticalAlignWithBackground in $sizes {
+  .#{$name} {
+    height: $size;
+    width: $size;
+    vertical-align: #{$verticalAlign};
+
+    &.#{$iconClassname}--withBackground {
+      vertical-align: #{$verticalAlignWithBackground};
+    }
+  }
+}

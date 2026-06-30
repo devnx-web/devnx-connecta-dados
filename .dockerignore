@@ -1,0 +1,12 @@
+.dockerignore
+.git
+.idea
+.local
+**/.gradle
+**/build
+**/node_modules
+**/build
+**/Dockerfile.*
+**/docker-compose*.yaml
+**/.terraform
+tools/bin/workflow/*

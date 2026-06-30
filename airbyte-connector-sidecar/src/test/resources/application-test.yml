@@ -1,0 +1,22 @@
+micronaut:
+  server:
+    port: -1
+
+airbyte:
+  edition: COMMUNITY
+  version: 0.4128173.0
+  acceptance:
+    test:
+      enabled: false
+  connector:
+    config-dir: src/test/resources/files
+  control:
+    plane:
+      auth-endpoint: ""
+  data:
+    plane:
+      service-account:
+        credentials-path: ""
+        email: ""
+  internal-api:
+    base-path: http://airbyte-server-svc:8001/api

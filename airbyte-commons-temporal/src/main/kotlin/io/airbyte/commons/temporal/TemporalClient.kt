@@ -1,0 +1,848 @@
+/*
+ * Copyright (c) 2020-2026 Airbyte, Inc., all rights reserved.
+ */
+
+package io.airbyte.commons.temporal
+
+import com.google.protobuf.ByteString
+import io.airbyte.commons.annotation.InternalForTesting
+import io.airbyte.commons.temporal.config.TemporalQueueConfiguration
+import io.airbyte.commons.temporal.exception.DeletedWorkflowException
+import io.airbyte.commons.temporal.exception.UnreachableWorkflowException
+import io.airbyte.commons.temporal.scheduling.ActorDefinitionUpdateInput
+import io.airbyte.commons.temporal.scheduling.ActorDefinitionUpdateOutput
+import io.airbyte.commons.temporal.scheduling.ActorDefinitionUpdateWorkflow
+import io.airbyte.commons.temporal.scheduling.CheckCommandInput
+import io.airbyte.commons.temporal.scheduling.ConnectionManagerWorkflow
+import io.airbyte.commons.temporal.scheduling.ConnectionManagerWorkflow.JobInformation
+import io.airbyte.commons.temporal.scheduling.ConnectorCommandInput
+import io.airbyte.commons.temporal.scheduling.ConnectorCommandWorkflow
+import io.airbyte.commons.temporal.scheduling.DiscoverCommandInput
+import io.airbyte.commons.temporal.scheduling.SpecCommandInput
+import io.airbyte.commons.temporal.scheduling.state.WorkflowState
+import io.airbyte.config.ActorContext
+import io.airbyte.config.ConfigScopeType
+import io.airbyte.config.ConnectorJobOutput
+import io.airbyte.config.FailureReason
+import io.airbyte.config.JobCheckConnectionConfig
+import io.airbyte.config.JobConfig.ConfigType
+import io.airbyte.config.JobDiscoverCatalogConfig
+import io.airbyte.config.JobGetSpecConfig
+import io.airbyte.config.RefreshStream
+import io.airbyte.config.StandardCheckConnectionInput
+import io.airbyte.config.StandardDiscoverCatalogInput
+import io.airbyte.config.StreamDescriptor
+import io.airbyte.config.WorkloadPriority
+import io.airbyte.config.persistence.StreamRefreshesRepository
+import io.airbyte.config.persistence.StreamResetPersistence
+import io.airbyte.config.persistence.saveStreamsToRefresh
+import io.airbyte.config.secrets.toInlined
+import io.airbyte.data.services.ScopedConfigurationService
+import io.airbyte.data.services.shared.NetworkSecurityTokenKey
+import io.airbyte.metrics.MetricAttribute
+import io.airbyte.metrics.MetricClient
+import io.airbyte.metrics.OssMetricsRegistry
+import io.airbyte.metrics.lib.MetricTags
+import io.airbyte.persistence.job.models.IntegrationLauncherConfig
+import io.airbyte.persistence.job.models.JobRunConfig
+import io.github.oshai.kotlinlogging.KotlinLogging
+import io.temporal.api.common.v1.WorkflowType
+import io.temporal.api.enums.v1.WorkflowExecutionStatus
+import io.temporal.api.filter.v1.StatusFilter
+import io.temporal.api.filter.v1.WorkflowTypeFilter
+import io.temporal.api.workflowservice.v1.ListClosedWorkflowExecutionsRequest
+import io.temporal.api.workflowservice.v1.ListOpenWorkflowExecutionsRequest
+import io.temporal.client.WorkflowClient
+import io.temporal.client.WorkflowOptions
+import io.temporal.client.WorkflowStub
+import io.temporal.common.RetryOptions
+import io.temporal.workflow.Functions
+import jakarta.inject.Named
+import jakarta.inject.Singleton
+import java.io.IOException
+import java.nio.file.Path
+import java.util.UUID
+import java.util.concurrent.CompletableFuture
+import java.util.concurrent.CompletionException
+import java.util.concurrent.ExecutionException
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.TimeoutException
+import java.util.function.Supplier
+import kotlin.jvm.optionals.getOrNull
+import kotlin.time.Duration
+import kotlin.time.measureTime
+
+private const val SAFE_TERMINATE_MESSAGE = "Terminating workflow in unreachable state before starting a new workflow for this connection"
+
+/**
+ * This is used to sleep between 2 temporal queries. The query is needed to ensure that the cancel
+ * and start manual sync methods wait before returning. Since temporal signals are async, we need to
+ * use the queries to make sure that we are in a state in which we want to continue with.
+ */
+private const val DELAY_BETWEEN_QUERY_MS = 10
+private const val START_MANUAL_SYNC_JOB_ID_WAIT_TIMEOUT_MS = 60_000L
+private val logger = KotlinLogging.logger { }
+
+/**
+ * Result of a manual operation.
+ */
+data class ManualOperationResult(
+  val failingReason: String? = null,
+  val jobId: Long? = null,
+  val errorCode: ErrorCode? = null,
+)
+
+/**
+ * Airbyte's interface over temporal.
+ */
+@Singleton
+class TemporalClient(
+  @param:Named("workspaceRootTemporal") private val workspaceRoot: Path,
+  private val queueConfiguration: TemporalQueueConfiguration,
+  private val workflowClientWrapped: WorkflowClientWrapped,
+  private val serviceStubsWrapped: WorkflowServiceStubsWrapped,
+  private val streamResetPersistence: StreamResetPersistence,
+  private val streamRefreshesRepository: StreamRefreshesRepository,
+  private val connectionManagerUtils: ConnectionManagerUtils,
+  private val streamResetRecordsHelper: StreamResetRecordsHelper,
+  private val metricClient: MetricClient,
+  private val scopedConfigurationService: ScopedConfigurationService,
+) {
+  private val workflowNames = mutableSetOf<String>()
+
+  /**
+   * Restart workflows stuck in a certain status.
+   *
+   * @param executionStatus execution status
+   * @return set of connection ids that were restarted, primarily used for tracking purposes
+   */
+  fun restartClosedWorkflowByStatus(executionStatus: WorkflowExecutionStatus): Int {
+    val workflowExecutionInfos = fetchClosedWorkflowsByStatus(executionStatus)
+    val nonRunningWorkflow = filterOutRunningWorkspaceId(workflowExecutionInfos)
+
+    nonRunningWorkflow.forEach { connectionId ->
+      with(connectionManagerUtils) {
+        safeTerminateWorkflow(connectionId, SAFE_TERMINATE_MESSAGE)
+        startConnectionManagerNoSignal(connectionId)
+      }
+    }
+
+    return nonRunningWorkflow.size
+  }
+
+  fun fetchClosedWorkflowsByStatus(executionStatus: WorkflowExecutionStatus): MutableSet<UUID> {
+    var workflowExecutionsRequest =
+      ListClosedWorkflowExecutionsRequest
+        .newBuilder()
+        .setNamespace(workflowClientWrapped.namespace)
+        .setStatusFilter(StatusFilter.newBuilder().setStatus(executionStatus).build())
+        .setTypeFilter(WorkflowTypeFilter.newBuilder().setName(ConnectionManagerWorkflow::class.java.getSimpleName()).build())
+        .build()
+
+    val workflowExecutionInfos = mutableSetOf<UUID>()
+    do {
+      val listOpenWorkflowExecutionsRequest = serviceStubsWrapped.blockingStubListClosedWorkflowExecutions(workflowExecutionsRequest)
+      val connectionManagerWorkflowType = WorkflowType.newBuilder().setName(ConnectionManagerWorkflow::class.java.getSimpleName()).build()
+
+      listOpenWorkflowExecutionsRequest
+        .executionsList
+        .filterNotNull()
+        .filter { it.type == connectionManagerWorkflowType && it.status == executionStatus }
+        .mapNotNull { extractConnectionIdFromWorkflowId(it.execution.workflowId) }
+        .toSet()
+        .also {
+          workflowExecutionInfos.addAll(it)
+        }
+
+      val token: ByteString? = listOpenWorkflowExecutionsRequest.nextPageToken
+
+      workflowExecutionsRequest =
+        ListClosedWorkflowExecutionsRequest
+          .newBuilder()
+          .setNamespace(workflowClientWrapped.namespace)
+          .setNextPageToken(token)
+          .build()
+    } while (token != null && token.size() > 0)
+
+    return workflowExecutionInfos
+  }
+
+  @InternalForTesting
+  internal fun filterOutRunningWorkspaceId(workflowIds: MutableSet<UUID>): Set<UUID> {
+    refreshRunningWorkflow()
+
+    val runningWorkflowByUUID =
+      workflowNames
+        .mapNotNull { extractConnectionIdFromWorkflowId(it) }
+        .toSet()
+
+    return workflowIds - runningWorkflowByUUID
+  }
+
+  @InternalForTesting
+  internal fun refreshRunningWorkflow() {
+    workflowNames.clear()
+
+    var openWorkflowExecutionsRequest =
+      ListOpenWorkflowExecutionsRequest
+        .newBuilder()
+        .setNamespace(workflowClientWrapped.namespace)
+        .build()
+
+    do {
+      val listOpenWorkflowExecutionsRequest = serviceStubsWrapped.blockingStubListOpenWorkflowExecutions(openWorkflowExecutionsRequest)
+      listOpenWorkflowExecutionsRequest.executionsList
+        .map { it.execution.workflowId }
+        .toSet()
+        .also { workflowNames.addAll(it) }
+
+      val token: ByteString? = listOpenWorkflowExecutionsRequest.nextPageToken
+
+      openWorkflowExecutionsRequest =
+        ListOpenWorkflowExecutionsRequest
+          .newBuilder()
+          .setNamespace(workflowClientWrapped.namespace)
+          .setNextPageToken(token)
+          .build()
+    } while (token != null && token.size() > 0)
+  }
+
+  private fun extractConnectionIdFromWorkflowId(workflowId: String): UUID? =
+    when {
+      workflowId.startsWith("connection_manager_") -> {
+        workflowId.removePrefix("connection_manager_").let { UUID.fromString(it) }
+      }
+
+      else -> null
+    }
+
+  fun getWorkflowState(connectionId: UUID): WorkflowState? = connectionManagerUtils.getWorkflowState(connectionId).getOrNull()
+
+  /**
+   * Start a manual sync for a connection.
+   *
+   * @param connectionId connection id
+   * @return sync result
+   */
+  fun startNewManualSync(connectionId: UUID): ManualOperationResult {
+    logger.info { "Manual sync request for connection $connectionId" }
+
+    if (connectionManagerUtils.isWorkflowStateRunning(connectionId)) {
+      // TODO Bmoric: Error is running
+      return ManualOperationResult(
+        failingReason = "A sync is already running for: $connectionId",
+        errorCode = ErrorCode.WORKFLOW_RUNNING,
+      )
+    }
+
+    try {
+      connectionManagerUtils.signalWorkflowAndRepairIfNecessary(connectionId) {
+        Functions.Proc { it.submitManualSync() }
+      }
+    } catch (e: DeletedWorkflowException) {
+      logger.error(e) { "Can't sync a deleted connection." }
+      return ManualOperationResult(
+        failingReason = e.message,
+        errorCode = ErrorCode.WORKFLOW_DELETED,
+      )
+    }
+
+    do {
+      try {
+        Thread.sleep(DELAY_BETWEEN_QUERY_MS.toLong())
+      } catch (_: InterruptedException) {
+        return ManualOperationResult(
+          failingReason = "Didn't managed to start a sync for: $connectionId",
+          errorCode = ErrorCode.UNKNOWN,
+        )
+      }
+    } while (!connectionManagerUtils.isWorkflowStateRunning(connectionId))
+
+    logger.info { "end of manual schedule" }
+    return ManualOperationResult(jobId = connectionManagerUtils.getCurrentJobId(connectionId))
+  }
+
+  /**
+   * Start a manual sync and return as soon as the workflow exposes the created job id.
+   *
+   * This is used by request paths that should not wait for the sync attempt to start.
+   *
+   * @param connectionId connection id
+   * @return sync result
+   */
+  fun startNewManualSyncAndWaitForJobId(connectionId: UUID): ManualOperationResult =
+    startNewManualSyncAndWaitForJobId(connectionId, START_MANUAL_SYNC_JOB_ID_WAIT_TIMEOUT_MS)
+
+  @InternalForTesting
+  internal fun startNewManualSyncAndWaitForJobId(
+    connectionId: UUID,
+    waitTimeoutMs: Long,
+  ): ManualOperationResult {
+    logger.info { "Manual sync request for connection $connectionId" }
+
+    val workflowState = connectionManagerUtils.getWorkflowState(connectionId).getOrNull()
+    if (workflowState?.isRunning == true) {
+      return ManualOperationResult(
+        failingReason = "A sync is already running for: $connectionId",
+        errorCode = ErrorCode.WORKFLOW_RUNNING,
+      )
+    }
+
+    val currentJobInformation = connectionManagerUtils.getJobInformation(connectionId)
+    if (workflowState?.isDoneWaiting == true &&
+      !workflowState.hasCapacityWaitInterruption() &&
+      currentJobInformation?.isQueuedPreAttempt() == true
+    ) {
+      logger.info { "manual sync job already created" }
+      return ManualOperationResult(jobId = currentJobInformation.jobId)
+    }
+    val oldJobId = currentJobInformation?.jobId ?: ConnectionManagerWorkflow.NON_RUNNING_JOB_ID
+
+    try {
+      connectionManagerUtils.signalWorkflowAndRepairIfNecessary(connectionId) {
+        Functions.Proc { it.submitManualSync() }
+      }
+    } catch (e: DeletedWorkflowException) {
+      logger.error(e) { "Can't sync a deleted connection." }
+      return ManualOperationResult(
+        failingReason = e.message,
+        errorCode = ErrorCode.WORKFLOW_DELETED,
+      )
+    }
+
+    val waitDeadlineNanos = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(waitTimeoutMs)
+    var jobId: Long?
+    do {
+      try {
+        Thread.sleep(DELAY_BETWEEN_QUERY_MS.toLong())
+      } catch (_: InterruptedException) {
+        Thread.currentThread().interrupt()
+        return ManualOperationResult(
+          failingReason = "Didn't manage to start a sync for: $connectionId",
+          errorCode = ErrorCode.UNKNOWN,
+        )
+      }
+      jobId = getNewJobId(connectionId, oldJobId)
+    } while (jobId == null && System.nanoTime() < waitDeadlineNanos)
+
+    if (jobId == null) {
+      return ManualOperationResult(
+        failingReason = "Timed out waiting for a sync job to be created for: $connectionId",
+        errorCode = ErrorCode.UNKNOWN,
+      )
+    }
+
+    logger.info { "manual sync job created" }
+    return ManualOperationResult(jobId = jobId)
+  }
+
+  /**
+   * Cancel a running job for a connection.
+   *
+   * @param connectionId connection id
+   * @return cancellation result
+   */
+  fun startNewCancellation(connectionId: UUID): ManualOperationResult {
+    logger.info { "Manual cancellation request" }
+
+    val jobId = connectionManagerUtils.getCurrentJobId(connectionId)
+
+    try {
+      connectionManagerUtils.signalWorkflowAndRepairIfNecessary(connectionId) {
+        Functions.Proc { it.cancelJob() }
+      }
+    } catch (e: DeletedWorkflowException) {
+      logger.error(e) { "Can't cancel a deleted workflow" }
+      return ManualOperationResult(
+        failingReason = e.message,
+        errorCode = ErrorCode.WORKFLOW_DELETED,
+      )
+    }
+
+    do {
+      try {
+        Thread.sleep(DELAY_BETWEEN_QUERY_MS.toLong())
+      } catch (_: InterruptedException) {
+        return ManualOperationResult(
+          failingReason = "Didn't manage to cancel a sync for: $connectionId",
+          errorCode = ErrorCode.UNKNOWN,
+        )
+      }
+    } while (connectionManagerUtils.isWorkflowStateRunning(connectionId))
+
+    streamResetRecordsHelper.deleteStreamResetRecordsForJob(jobId, connectionId)
+
+    logger.info { "end of manual cancellation" }
+
+    return ManualOperationResult(jobId = jobId)
+  }
+
+  fun resetConnectionAsync(
+    connectionId: UUID,
+    streamsToReset: List<StreamDescriptor>,
+  ) {
+    try {
+      streamResetPersistence.createStreamResets(connectionId, streamsToReset)
+      connectionManagerUtils.signalWorkflowAndRepairIfNecessary(connectionId) {
+        Functions.Proc { it.resetConnection() }
+      }
+    } catch (e: IOException) {
+      logger.error { "Not able to properly create a reset" }
+      throw RuntimeException(e)
+    } catch (e: DeletedWorkflowException) {
+      logger.error { "Not able to properly create a reset" }
+      throw RuntimeException(e)
+    }
+  }
+
+  fun refreshConnectionAsync(
+    connectionId: UUID,
+    streamsToRefresh: List<StreamDescriptor>,
+    refreshType: RefreshStream.RefreshType,
+  ) {
+    try {
+      streamRefreshesRepository.saveStreamsToRefresh(connectionId, streamsToRefresh, refreshType)
+      // This isn't actually doing a reset. workflow::resetConnection will cancel the current run if any
+      // and cause the workflow to run immediately. The next run will be a refresh because we just saved a
+      // refresh configuration.
+      connectionManagerUtils.signalWorkflowAndRepairIfNecessary(connectionId) {
+        Functions.Proc { it.resetConnection() }
+      }
+    } catch (e: DeletedWorkflowException) {
+      logger.error { "Not able to properly create a reset" }
+      throw RuntimeException(e)
+    }
+  }
+
+  /**
+   * Submit a reset connection job to temporal.
+   *
+   * @param connectionId connection id
+   * @param streamsToReset streams that should be rest on the connection
+   * @return result of reset connection
+   */
+  fun resetConnection(
+    connectionId: UUID,
+    streamsToReset: List<StreamDescriptor>,
+  ): ManualOperationResult {
+    logger.info { "reset sync request" }
+
+    try {
+      streamResetPersistence.createStreamResets(connectionId, streamsToReset)
+    } catch (e: IOException) {
+      logger.error(e) { "Could not persist streams to reset." }
+      return ManualOperationResult(failingReason = e.message, errorCode = ErrorCode.UNKNOWN)
+    }
+
+    // get the job ID before the reset, defaulting to NON_RUNNING_JOB_ID if workflow is unreachable
+    val oldJobId = connectionManagerUtils.getCurrentJobId(connectionId)
+
+    try {
+      connectionManagerUtils.signalWorkflowAndRepairIfNecessary(connectionId) {
+        Functions.Proc { it.resetConnection() }
+      }
+    } catch (e: DeletedWorkflowException) {
+      logger.error(e) { "Can't reset a deleted workflow" }
+      return ManualOperationResult(failingReason = e.message, errorCode = ErrorCode.UNKNOWN)
+    }
+
+    var newJobId: Long?
+
+    do {
+      try {
+        Thread.sleep(DELAY_BETWEEN_QUERY_MS.toLong())
+      } catch (_: InterruptedException) {
+        return ManualOperationResult(failingReason = "Didn't manage to reset a sync for: $connectionId", errorCode = ErrorCode.UNKNOWN)
+      }
+
+      newJobId = getNewJobId(connectionId, oldJobId)
+    } while (newJobId == null)
+
+    logger.info { "end of reset submission" }
+
+    return ManualOperationResult(jobId = newJobId)
+  }
+
+  private fun getNewJobId(
+    connectionId: UUID,
+    oldJobId: Long,
+  ): Long? {
+    val currentJobId =
+      connectionManagerUtils.getCurrentJobId(connectionId)
+    if (currentJobId == ConnectionManagerWorkflow.NON_RUNNING_JOB_ID || currentJobId == oldJobId) {
+      return null
+    } else {
+      return currentJobId
+    }
+  }
+
+  private fun JobInformation.isQueuedPreAttempt(): Boolean =
+    jobId != ConnectionManagerWorkflow.NON_RUNNING_JOB_ID &&
+      attemptId == ConnectionManagerWorkflow.NON_RUNNING_ATTEMPT_ID &&
+      configType == ConfigType.SYNC
+
+  private fun WorkflowState.hasCapacityWaitInterruption(): Boolean =
+    isDeleted ||
+      isUpdated ||
+      isCancelled ||
+      isCancelledForReset
+
+  /**
+   * Submit a spec job to temporal.
+   *
+   * @param jobId job id
+   * @param attempt attempt
+   * @param workspaceId workspace id
+   * @param config spec config
+   * @return spec output
+   */
+  fun submitGetSpec(
+    jobId: UUID,
+    attempt: Int,
+    workspaceId: UUID,
+    config: JobGetSpecConfig,
+  ): TemporalResponse<ConnectorJobOutput> {
+    val jobRunConfig = TemporalWorkflowUtils.createJobRunConfig(jobId, attempt)
+    val launcherConfig =
+      IntegrationLauncherConfig()
+        .withJobId(jobId.toString())
+        .withAttemptId(attempt.toLong())
+        .withWorkspaceId(workspaceId)
+        .withDockerImage(config.getDockerImage())
+        .withIsCustomConnector(config.getIsCustomConnector())
+
+    return executeConnectorCommandWorkflow(jobRunConfig, SpecCommandInput(SpecCommandInput.SpecInput(jobRunConfig, launcherConfig)))
+  }
+
+  /**
+   * Submit a check job to temporal.
+   *
+   * @param jobId job id
+   * @param attempt attempt
+   * @param config check config
+   * @return check output
+   */
+  fun submitCheckConnection(
+    jobId: UUID,
+    attempt: Int,
+    workspaceId: UUID,
+    config: JobCheckConnectionConfig,
+    context: ActorContext?,
+  ): TemporalResponse<ConnectorJobOutput> {
+    val jobRunConfig = TemporalWorkflowUtils.createJobRunConfig(jobId, attempt)
+    val launcherConfig =
+      IntegrationLauncherConfig()
+        .withJobId(jobId.toString())
+        .withAttemptId(attempt.toLong())
+        .withWorkspaceId(workspaceId)
+        .withDockerImage(config.dockerImage)
+        .withProtocolVersion(config.protocolVersion)
+        .withIsCustomConnector(config.isCustomConnector)
+        .withPriority(WorkloadPriority.HIGH)
+
+    val input =
+      StandardCheckConnectionInput()
+        .withActorType(config.actorType)
+        .withActorId(config.actorId)
+        .withConnectionConfiguration(config.connectionConfiguration.toInlined().value)
+        .withResourceRequirements(config.resourceRequirements)
+        .withActorContext(context)
+        .withNetworkSecurityTokens(getNetworkSecurityTokens(workspaceId))
+
+    return executeConnectorCommandWorkflow(
+      jobRunConfig,
+      CheckCommandInput(CheckCommandInput.CheckConnectionInput(jobRunConfig, launcherConfig, input)),
+    )
+  }
+
+  /**
+   * Submit a discover job to temporal.
+   *
+   * @param jobId job id
+   * @param attempt attempt
+   * @param config discover config
+   * @param context actor context
+   * @return discover output
+   */
+  fun submitDiscoverSchema(
+    jobId: UUID,
+    attempt: Int,
+    workspaceId: UUID,
+    config: JobDiscoverCatalogConfig,
+    context: ActorContext?,
+    priority: WorkloadPriority?,
+  ): TemporalResponse<ConnectorJobOutput> {
+    val jobRunConfig = TemporalWorkflowUtils.createJobRunConfig(jobId, attempt)
+    val launcherConfig =
+      IntegrationLauncherConfig()
+        .withJobId(jobId.toString())
+        .withAttemptId(attempt.toLong())
+        .withWorkspaceId(workspaceId)
+        .withDockerImage(config.getDockerImage())
+        .withProtocolVersion(config.getProtocolVersion())
+        .withIsCustomConnector(config.getIsCustomConnector())
+        .withPriority(priority)
+    val input =
+      StandardDiscoverCatalogInput()
+        .withConnectionConfiguration(config.connectionConfiguration.toInlined().value)
+        .withSourceId(config.getSourceId())
+        .withConnectorVersion(config.getConnectorVersion())
+        .withConfigHash(config.getConfigHash())
+        .withResourceRequirements(config.getResourceRequirements())
+        .withActorContext(context)
+        .withManual(true)
+        .withNetworkSecurityTokens(getNetworkSecurityTokens(workspaceId))
+
+    return executeConnectorCommandWorkflow(
+      jobRunConfig,
+      DiscoverCommandInput(DiscoverCommandInput.DiscoverCatalogInput(jobRunConfig, launcherConfig, input)),
+    )
+  }
+
+  /**
+   * Run update to start connection manager workflows for connection ids.
+   *
+   * @param connectionIds connection ids
+   * // todo (cgardens) - i dunno what this is
+   */
+  fun migrateSyncIfNeeded(connectionIds: Set<UUID>) {
+    val globalMigrationTime =
+      measureTime {
+        refreshRunningWorkflow()
+        connectionIds.forEach { connectionId ->
+          val singleMigrationTime =
+            measureTime {
+              if (!isInRunningWorkflowCache(connectionManagerUtils.getConnectionManagerName(connectionId))) {
+                logger.info { "Migrating: $connectionId" }
+                try {
+                  submitConnectionUpdaterAsync(connectionId)
+                } catch (e: Exception) {
+                  logger.error(e) { "New workflow submission failed, retrying" }
+                  refreshRunningWorkflow()
+                  submitConnectionUpdaterAsync(connectionId)
+                }
+              }
+            }
+
+          logger.info { "Sync migration took: ${singleMigrationTime.formatTime()}" }
+        }
+      }
+
+    logger.info { "The migration to the new scheduler took: ${globalMigrationTime.formatTime()}" }
+  }
+
+  // formatTime exists to mimic the previous apache StopWatch.formatTime method
+  private fun Duration.formatTime(): String =
+    this.toComponents { hours, minutes, seconds, nano ->
+      "%02d:%02d:%02d.%03d".format(hours, minutes, seconds, nano / 1_000_000)
+    }
+
+  @InternalForTesting
+  fun <T : Any> execute(
+    jobRunConfig: JobRunConfig,
+    executor: Supplier<T>,
+  ): TemporalResponse<T> {
+    val jobRoot = TemporalUtils.getJobRoot(workspaceRoot, jobRunConfig.jobId, jobRunConfig.attemptId)
+    val logPath = TemporalUtils.getLogPath(jobRoot)
+
+    var operationOutput: T? = null
+    var exception: RuntimeException? = null
+
+    try {
+      operationOutput = executor.get()
+    } catch (e: RuntimeException) {
+      exception = e
+    }
+
+    var succeeded = exception == null
+    if (succeeded && operationOutput is ConnectorJobOutput) {
+      succeeded = getConnectorJobSucceeded(operationOutput as ConnectorJobOutput)
+    }
+
+    val metadata = JobMetadata(succeeded, logPath)
+    return TemporalResponse<T>(operationOutput, metadata)
+  }
+
+  private fun executeConnectorCommandWorkflow(
+    jobRunConfig: JobRunConfig,
+    input: ConnectorCommandInput,
+  ): TemporalResponse<ConnectorJobOutput> {
+    val workflowOptions =
+      WorkflowOptions
+        .newBuilder()
+        .setTaskQueue(queueConfiguration.uiCommandsQueue)
+        .setRetryOptions(RetryOptions.newBuilder().setMaximumAttempts(1).build())
+        .setWorkflowId("${input.type}_${jobRunConfig.jobId}")
+        .build()
+
+    return execute(jobRunConfig) {
+      workflowClientWrapped
+        .newWorkflowStub(ConnectorCommandWorkflow::class.java, workflowOptions)
+        .run(input)
+    }
+  }
+
+  /**
+   * Signal to the connection manager workflow asynchronously that there has been a change to the
+   * connection's configuration.
+   *
+   * @param connectionId connection id
+   */
+  fun submitConnectionUpdaterAsync(connectionId: UUID): ConnectionManagerWorkflow {
+    logger.info { "Starting the scheduler temporal wf" }
+    val connectionManagerWorkflow = connectionManagerUtils.startConnectionManagerNoSignal(connectionId)
+
+    try {
+      CompletableFuture
+        .supplyAsync {
+          try {
+            do {
+              Thread.sleep(DELAY_BETWEEN_QUERY_MS.toLong())
+            } while (!isWorkflowReachable(connectionId))
+          } catch (_: InterruptedException) {
+            // no op
+          }
+          null
+        }.get(60, TimeUnit.SECONDS)
+    } catch (e: InterruptedException) {
+      logger.error(e) { "Failed to create a new connection manager workflow" }
+    } catch (e: ExecutionException) {
+      logger.error(e) { "Failed to create a new connection manager workflow" }
+    } catch (e: TimeoutException) {
+      logger.error(e) { "Can't create a new connection manager workflow due to timeout" }
+    }
+
+    return connectionManagerWorkflow
+  }
+
+  /**
+   * This will cancel a workflow even if the connection is deleted already.
+   *
+   * @param connectionId - connectionId to cancel
+   */
+  fun forceDeleteWorkflow(connectionId: UUID): Unit = connectionManagerUtils.deleteWorkflowIfItExist(connectionId)
+
+  /**
+   * Signal to the connection manager workflow that there has been a change to the connection's
+   * configuration.
+   *
+   * @param connectionId connection id
+   */
+  fun update(connectionId: UUID) {
+    val connectionManagerWorkflow: ConnectionManagerWorkflow
+
+    try {
+      connectionManagerWorkflow = connectionManagerUtils.getConnectionManagerWorkflow(connectionId)
+    } catch (_: DeletedWorkflowException) {
+      logger.info { "Connection $connectionId is deleted, and therefore cannot be updated." }
+      return
+    } catch (e: UnreachableWorkflowException) {
+      metricClient.count(
+        metric = OssMetricsRegistry.WORFLOW_UNREACHABLE,
+        attributes = arrayOf(MetricAttribute(MetricTags.CONNECTION_ID, connectionId.toString())),
+      )
+      logger.error(e) {
+        "Failed to retrieve ConnectionManagerWorkflow for connection $connectionId. Repairing state by creating new workflow."
+      }
+      connectionManagerUtils.safeTerminateWorkflow(
+        connectionId,
+        "Terminating workflow in unreachable state before starting a new workflow for this connection",
+      )
+      submitConnectionUpdaterAsync(connectionId)
+      return
+    }
+
+    connectionManagerWorkflow.connectionUpdated()
+  }
+
+  private fun getConnectorJobSucceeded(output: ConnectorJobOutput): Boolean = output.failureReason == null
+
+  /**
+   * Check if a workflow is reachable for signal calls by attempting to query for current state. If
+   * the query succeeds, and the workflow is not marked as deleted, the workflow is reachable.
+   */
+  @InternalForTesting
+  internal fun isWorkflowReachable(connectionId: UUID): Boolean =
+    try {
+      connectionManagerUtils.getConnectionManagerWorkflow(connectionId)
+      true
+    } catch (_: Exception) {
+      false
+    }
+
+  fun isInRunningWorkflowCache(workflowName: String?): Boolean = workflowNames.contains(workflowName)
+
+  private fun getNetworkSecurityTokens(workspaceId: UUID): List<String> =
+    try {
+      scopedConfigurationService
+        .getScopedConfigurations(NetworkSecurityTokenKey, mapOf(ConfigScopeType.WORKSPACE to workspaceId))
+        .map { it.value }
+        .toList()
+    } catch (e: IllegalArgumentException) {
+      logger.error { e.message }
+      emptyList()
+    }
+
+  /**
+   * Start an actor definition update workflow asynchronously.
+   *
+   * @param input workflow input containing actor definition update details
+   */
+  fun submitActorDefinitionUpdateAsync(input: ActorDefinitionUpdateInput) {
+    logger.info { "Starting actor definition update workflow for requestId: ${input.requestId}" }
+
+    val workflowOptions =
+      WorkflowOptions
+        .newBuilder()
+        .setTaskQueue(queueConfiguration.uiCommandsQueue)
+        .setRetryOptions(RetryOptions.newBuilder().setMaximumAttempts(1).build())
+        .setWorkflowId(input.requestId)
+        .build()
+
+    val workflow =
+      workflowClientWrapped.newWorkflowStub(
+        ActorDefinitionUpdateWorkflow::class.java,
+        workflowOptions,
+      )
+
+    // Start workflow asynchronously
+    WorkflowClient.start(workflow::run, input)
+  }
+
+  /**
+   * Attempts to retrieve the result of an actor definition update workflow based on the provided request ID.
+   * If the workflow is still running, it will return null. If an error occurs, it will return an
+   * `ActorDefinitionUpdateOutput` containing relevant failure details.
+   *
+   * @param requestId the unique identifier of the workflow to retrieve the result for
+   * @return an `ActorDefinitionUpdateOutput` if the workflow is complete and successful,
+   *         null if the workflow is still running, or an `ActorDefinitionUpdateOutput` with failure details if an error occurred
+   */
+  fun tryGetActorDefinitionWorkflowResult(requestId: String): ActorDefinitionUpdateOutput? {
+    val workflow = workflowClientWrapped.newWorkflowStub(ActorDefinitionUpdateWorkflow::class.java, requestId)
+    // Use WorkflowStub to get the result
+    val untypedWorkflowStub = WorkflowStub.fromTyped(workflow)
+    val resultFuture = untypedWorkflowStub.getResultAsync(ActorDefinitionUpdateOutput::class.java)
+    return try {
+      // Using get with a timeout because getNow tend to always return incomplete.
+      resultFuture.get(500, TimeUnit.MILLISECONDS)
+    } catch (_: TimeoutException) {
+      // we hit the timeout from the get so we assume the workflow is still running.
+      return null
+    } catch (e: CompletionException) {
+      logger.warn(e) { "Failed to retrieve the actor definition workflow for request $requestId." }
+      ActorDefinitionUpdateOutput(
+        actorDefinitionId = null,
+        commandId = null,
+        failureReason =
+          FailureReason()
+            // This isn't the most accurate; on a bad config where the image doesn't exist, we fail hard from a timeout.
+            // A further improvement is to catch those and report them as config errors.
+            .withFailureOrigin(FailureReason.FailureOrigin.AIRBYTE_PLATFORM)
+            .withFailureType(FailureReason.FailureType.SYSTEM_ERROR)
+            .withStacktrace(e.stackTraceToString())
+            .withTimestamp(System.currentTimeMillis()),
+      )
+    }
+  }
+}

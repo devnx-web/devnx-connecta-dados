@@ -1,0 +1,279 @@
+micronaut:
+  application:
+    name: airbyte-workers
+  server:
+    netty:
+      aggregator:
+        max-content-length: 52428800 # 50MB
+    max-request-size: 10485760 # 10MB the micronaut default. If we want to bump, double check it works for nginx.
+    port: 9000
+  caches:
+    # used by the analytics tracking client to cache calls to resolve the deployment and identity (workspace) for
+    # track events
+    analytics-tracking-deployments:
+      charset: "UTF-8"
+      expire-after-access: 10m
+    analytics-tracking-identity:
+      charset: "UTF-8"
+      expire-after-access: 10m
+    # used by RecordMetricActivity to cache repeated calls to workspaceApi.getWorkspaceByConnectionId.
+    # entries are UUID connectionIds, so 100,000 entries should be roughly 1.6MB
+    connection-workspace-id:
+      maximumSize: 100_000
+  metrics:
+    enabled: ${MICROMETER_METRICS_ENABLED:false}
+    export:
+      otlp:
+        enabled: ${MICROMETER_METRICS_OTLP_ENABLED:false}
+        step: ${MICROMETER_METRICS_STEP:PT30S}
+        url: ${OTEL_COLLECTOR_ENDPOINT:`http://localhost:4318/v1/metrics`}
+      statsd:
+        enabled: ${MICROMETER_METRICS_STATSD_ENABLED:false}
+        flavor: ${MICROMETER_METRICS_STATSD_FLAVOR:datadog}
+        step: ${MICROMETER_METRICS_STEP:PT30S}
+        host: ${STATSD_HOST:localhost}
+        port: ${STATSD_PORT:8125}
+  security:
+    enabled: ${API_AUTHORIZATION_ENABLED:false}
+    # the rest of this section is ignored if enabled=false
+    filter:
+      enabled: false
+
+airbyte:
+  airbyte-url: ${AIRBYTE_URL:}
+  license-key: ${AIRBYTE_LICENSE_KEY:empty}
+  activity:
+    initial-delay: ${ACTIVITY_INITIAL_DELAY_BETWEEN_ATTEMPTS_SECONDS:30}
+    max-attempts: ${ACTIVITY_MAX_ATTEMPT:5}
+    max-delay: ${ACTIVITY_MAX_DELAY_BETWEEN_ATTEMPTS_SECONDS:600}
+    max-timeout: ${ACTIVITY_MAX_TIMEOUT_SECOND:120}
+    check-timeout: ${ACTIVITY_CHECK_TIMEOUT:10}
+    discovery-timeout: ${ACTIVITY_DISCOVERY_TIMEOUT:30}
+  acceptance:
+    test:
+      enabled: ${ACCEPTANCE_TEST_ENABLED:false}
+  cloud:
+    storage:
+      type: ${STORAGE_TYPE}
+      bucket:
+        log: ${STORAGE_BUCKET_LOG}
+        state: ${STORAGE_BUCKET_STATE}
+        workload-output: ${STORAGE_BUCKET_WORKLOAD_OUTPUT}
+        activity-payload: ${STORAGE_BUCKET_ACTIVITY_PAYLOAD}
+        audit-logging: ${STORAGE_BUCKET_AUDIT_LOGGING}
+      azure:
+        connection-string: ${AZURE_STORAGE_CONNECTION_STRING:}
+      gcs:
+        application-credentials: ${GOOGLE_APPLICATION_CREDENTIALS:}
+      minio:
+        access-key: ${AWS_ACCESS_KEY_ID:}
+        endpoint: ${MINIO_ENDPOINT:}
+        secret-access-key: ${AWS_SECRET_ACCESS_KEY:}
+      s3:
+        access-key: ${AWS_ACCESS_KEY_ID:}
+        region: ${AWS_DEFAULT_REGION:}
+        secret-access-key: ${AWS_SECRET_ACCESS_KEY:}
+  connector:
+    specific-resource-defaults-enabled: ${CONNECTOR_SPECIFIC_RESOURCE_DEFAULTS_ENABLED:false}
+  connector-registry:
+    remote:
+      base-url: ${CONNECTOR_REGISTRY_BASE_URL:}
+      timeout-ms: ${CONNECTOR_REGISTRY_TIMEOUT_MS:30000}
+  control:
+    plane:
+      auth-endpoint: ${CONTROL_PLANE_AUTH_ENDPOINT:}
+  data-plane:
+    check:
+      task-queue: ${DATA_CHECK_TASK_QUEUES:CHECK_CONNECTION}
+    discover:
+      task-queue: ${DATA_DISCOVER_TASK_QUEUES:DISCOVER_SCHEMA}
+    sync:
+      task-queue: ${DATA_SYNC_TASK_QUEUES:SYNC}
+  data:
+    plane:
+      service-account:
+        credentials-path: ${DATA_PLANE_SERVICE_ACCOUNT_CREDENTIALS_PATH:}
+        email: ${DATA_PLANE_SERVICE_ACCOUNT_EMAIL:}
+  edition: ${AIRBYTE_EDITION:COMMUNITY}
+  feature-flag:
+    client: ${FEATURE_FLAG_CLIENT:CONFIGFILE}
+    path: ${FEATURE_FLAG_PATH:/flags}
+    api-key: ${LAUNCHDARKLY_KEY:}
+    base-url: ${FEATURE_FLAG_BASEURL:}
+  internal-api:
+    base-path: ${INTERNAL_API_HOST}/api
+    connect-timeout-seconds: ${AIRBYTE_API_CONNECT_TIMEOUT_SECONDS:30}
+    read-timeout-seconds: ${AIRBYTE_API_READ_TIMEOUT_SECONDS:600}
+    retries:
+      delay-seconds: ${AIRBYTE_API_RETRY_DELAY_SECONDS:2}
+      max: ${AIRBYTE_API_MAX_RETRIES:5}
+    auth:
+      type: INTERNAL_CLIENT_TOKEN
+      signature-secret: ${AB_JWT_SIGNATURE_SECRET:}
+  notification:
+    customerio:
+      apikey: ${CUSTOMERIO_API_KEY:}
+  protocol:
+    min-version: ${AIRBYTE_PROTOCOL_VERSION_MIN:0.0.0}
+    max-version: ${AIRBYTE_PROTOCOL_VERSION_MAX:0.3.0}
+  retries:
+    complete-failures:
+      max-successive: ${SYNC_JOB_RETRIES_COMPLETE_FAILURES_MAX_SUCCESSIVE:5}
+      max-total: ${SYNC_JOB_RETRIES_COMPLETE_FAILURES_MAX_TOTAL:10}
+      backoff:
+        min-interval-s: ${SYNC_JOB_RETRIES_COMPLETE_FAILURES_BACKOFF_MIN_INTERVAL_S:10}
+        max-interval-s: ${SYNC_JOB_RETRIES_COMPLETE_FAILURES_BACKOFF_MAX_INTERVAL_S:1800} # 30 minutes
+        base: ${SYNC_JOB_RETRIES_COMPLETE_FAILURES_BACKOFF_BASE:3} # 10s, 30s, 90s, 4.5m
+    partial-failures:
+      max-successive: ${SYNC_JOB_RETRIES_PARTIAL_FAILURES_MAX_SUCCESSIVE:1000}
+      max-total: ${SYNC_JOB_RETRIES_PARTIAL_FAILURES_MAX_TOTAL:20}
+  worker:
+    check:
+      enabled: ${SHOULD_RUN_CHECK_CONNECTION_WORKFLOWS:true}
+      max-workers: ${MAX_CHECK_WORKERS:5}
+    isolated:
+      kube:
+        use-custom-node-selector: ${USE_CUSTOM_NODE_SELECTOR:false}
+        node-selectors: ${JOB_ISOLATED_KUBE_NODE_SELECTORS:}
+    connection:
+      enabled: ${SHOULD_RUN_CONNECTION_MANAGER_WORKFLOWS:true}
+      schedule-jitter: # defines 'jitter buckets' depending on job frequency. prefers thresholds at the half-hour mark since most jobs run every X hours.
+        no-jitter-cutoff-minutes: ${SCHEDULE_NO_JITTER_CUTOFF_MINUTES:5} # anything less than every 5 minutes has no jitter
+        high-frequency-bucket:
+          jitter-amount-minutes: ${SCHEDULE_HIGH_JITTER_AMOUNT_MINUTES:2} # anything between every 5 minutes and 1.5 hours has up to 2 minutes of added jitter
+          threshold-minutes: ${SCHEDULE_HIGH_THRESHOLD_MINUTES:90} # 1.5 hours
+        medium-frequency-bucket:
+          jitter-amount-minutes: ${SCHEDULE_MEDIUM_JITTER_AMOUNT_MINUTES:5} # anything between every 1.5 hours and 2.5 hours has up to 5 minutes of added jitter
+          threshold-minutes: ${SCHEDULE_MEDIUM_THRESHOLD_MINUTES:150} # 2.5 hours
+        low-frequency-bucket:
+          jitter-amount-minutes: ${SCHEDULE_LOW_JITTER_AMOUNT_MINUTES:15} # anything between every 2.5 hours and 6.5 hours has up to 15 minutes of added jitter
+          threshold-minutes: ${SCHEDULE_LOW_THRESHOLD_MINUTES:390} # 6.5 hours
+        very-low-frequency-bucket:
+          jitter-amount-minutes: ${SCHEDULE_VERY_LOW_JITTER_AMOUNT_MINUTES:25} # anything greater than every 6.5 hours has up to 25 minutes of added jitter
+    discover:
+      enabled: ${SHOULD_RUN_DISCOVER_WORKFLOWS:true}
+      auto-refresh-window: ${DISCOVER_REFRESH_WINDOW_MINUTES:1440}
+      max-workers: ${MAX_CHECK_WORKERS:5}
+    job:
+      error-reporting:
+        sentry:
+          dsn: ${JOB_ERROR_REPORTING_SENTRY_DSN:}
+        strategy: ${JOB_ERROR_REPORTING_STRATEGY:LOGGING}
+    spec:
+      enabled: ${SHOULD_RUN_GET_SPEC_WORKFLOWS:true}
+      max-workers: ${MAX_CHECK_WORKERS:5}
+    sync:
+      enabled: ${SHOULD_RUN_SYNC_WORKFLOWS:true}
+      max-workers: ${MAX_SYNC_WORKERS:10}
+      max-attempts: ${SYNC_JOB_MAX_ATTEMPTS:3}
+      max-timeout: ${SYNC_JOB_MAX_TIMEOUT_DAYS:3}
+      max-init-timeout: ${SYNC_JOB_INIT_RETRY_TIMEOUT_MINUTES:3}
+    notify:
+      enabled: ${SHOULD_RUN_NOTIFY_WORKFLOWS:true}
+      max-workers: ${MAX_NOTIFY_WORKERS:5}
+  secret:
+    persistence: ${SECRET_PERSISTENCE:TESTING_CONFIG_DB_TABLE}
+    store:
+      aws:
+        access-key: ${AWS_SECRET_MANAGER_ACCESS_KEY_ID:}
+        secret-key: ${AWS_SECRET_MANAGER_SECRET_ACCESS_KEY:}
+        region: ${AWS_SECRET_MANAGER_REGION:}
+        kmsKeyArn: ${AWS_KMS_KEY_ARN:}
+        tags: ${AWS_SECRET_MANAGER_SECRET_TAGS:}
+      gcp:
+        credentials: ${SECRET_STORE_GCP_CREDENTIALS:}
+        project-id: ${SECRET_STORE_GCP_PROJECT_ID:}
+        region: ${SECRET_STORE_GCP_REGION:}
+      vault:
+        address: ${VAULT_ADDRESS:}
+        prefix: ${VAULT_PREFIX:}
+        token: ${VAULT_AUTH_TOKEN:}
+      azure:
+        vault-url: ${AB_AZURE_KEY_VAULT_VAULT_URL:}
+        tenant-id: ${AB_AZURE_KEY_VAULT_TENANT_ID:}
+        client-id: ${AB_AZURE_KEY_VAULT_CLIENT_ID:}
+        client-secret: ${AB_AZURE_KEY_VAULT_CLIENT_SECRET:}
+        tags: ${AB_AZURE_KEY_VAULT_TAGS:}
+  temporal:
+    cloud:
+      client:
+        cert: ${TEMPORAL_CLOUD_CLIENT_CERT:}
+        key: ${TEMPORAL_CLOUD_CLIENT_KEY:}
+      enabled: ${TEMPORAL_CLOUD_ENABLED:false}
+      host: ${TEMPORAL_CLOUD_HOST:}
+      namespace: ${TEMPORAL_CLOUD_NAMESPACE:}
+    host: ${TEMPORAL_HOST:`airbyte-temporal:7233`}
+    retention: ${TEMPORAL_HISTORY_RETENTION_IN_DAYS:30}
+    sdk:
+      timeouts:
+        rpc-timeout: ${TEMPORAL_SDK_RPC_TIMEOUT:60s}
+        rpc-long-poll-timeout: ${TEMPORAL_SDK_RPC_LONG_POLL_TIMEOUT:70s}
+        rpc-query-timeout: ${TEMPORAL_SDK_RPC_QUERY_TIMEOUT:10s}
+  tracking:
+    strategy: ${TRACKING_STRATEGY:LOGGING}
+    write-key: ${SEGMENT_WRITE_KEY:}
+  version: ${AIRBYTE_VERSION:dev}
+  web-app:
+    url: ${AIRBYTE_URL:}
+  workflow:
+    failure:
+      restart-delay: ${WORKFLOW_FAILURE_RESTART_DELAY_SECONDS:600}
+  workload-api:
+    base-path: ${WORKLOAD_API_HOST:}
+    connect-timeout-seconds: ${WORKLOAD_API_CONNECT_TIMEOUT_SECONDS:30}
+    read-timeout-seconds: ${WORKLOAD_API_READ_TIMEOUT_SECONDS:300}
+    retries:
+      delay-seconds: ${WORKLOAD_API_RETRY_DELAY_SECONDS:2}
+      max: ${WORKLOAD_API_MAX_RETRIES:5}
+  workspace-root: ${WORKSPACE_ROOT}
+
+endpoints:
+  all:
+    port: 8085
+  beans:
+    enabled: true
+    sensitive: false
+  caches:
+    enabled: true
+    sensitive: false
+  env:
+    enabled: true
+    sensitive: false
+  health:
+    enabled: false
+    jdbc:
+      enabled: false
+    sensitive: false
+  info:
+    enabled: true
+    sensitive: true
+  loggers:
+    enabled: true
+    sensitive: true
+  metrics:
+    enabled: ${MICROMETER_METRICS_ENABLED:false}
+    sensitive: false
+  refresh:
+    enabled: false
+    sensitive: true
+  routes:
+    enabled: true
+    sensitive: false
+  threaddump:
+    enabled: true
+    sensitive: true
+
+google:
+  application:
+    credentials: ${GOOGLE_APPLICATION_CREDENTIALS:}
+
+logger:
+  levels:
+    com.zaxxer.hikari: ERROR
+    com.zaxxer.hikari.pool: ERROR
+    io.grpc: INFO
+    io.fabric8.kubernetes.client: INFO
+    io.netty: INFO
+    io.temporal: INFO
+#   Uncomment to help resolve issues with conditional beans
+#      io.micronaut.context.condition: DEBUG

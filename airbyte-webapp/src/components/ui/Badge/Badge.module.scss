@@ -1,0 +1,47 @@
+@use "scss/colors";
+@use "scss/variables";
+
+.badge {
+  width: fit-content;
+  font-size: variables.$font-size-xs;
+  border-radius: variables.$border-radius-pill;
+  padding: variables.$spacing-xs variables.$spacing-sm;
+  display: inline-block;
+  line-height: 1;
+  white-space: nowrap;
+  font-weight: 500;
+
+  &--uppercase {
+    text-transform: uppercase;
+  }
+
+  &--blue {
+    color: colors.$blue-600;
+    background-color: colors.$blue-50;
+  }
+
+  &--darkBlue {
+    color: colors.$foreground;
+    background-color: colors.$dark-blue;
+  }
+
+  &--grey {
+    color: colors.$grey-900;
+    background-color: colors.$grey-100;
+  }
+
+  &--green {
+    color: colors.$green-800;
+    background-color: colors.$green-50;
+  }
+
+  &--yellow {
+    color: colors.$yellow-800;
+    background-color: colors.$yellow-50;
+  }
+
+  &--red {
+    color: colors.$red-800;
+    background-color: colors.$red-50;
+  }
+}

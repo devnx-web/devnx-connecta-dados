@@ -1,0 +1,28 @@
+@use "scss/variables";
+
+.jobLogsContainer {
+  height: 100%;
+  overflow: hidden;
+}
+
+.attemptDropdown {
+  white-space: nowrap;
+
+  &__listbox {
+    min-width: 134px; /** So the box does not change width when switching between attempts **/
+  }
+}
+
+.downloadLogs {
+  margin-left: auto;
+}
+
+.attemptLoading {
+  position: relative;
+  flex-grow: 1;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  flex-direction: column;
+  gap: variables.$spacing-lg;
+}

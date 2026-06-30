@@ -1,0 +1,43 @@
+@use "scss/variables";
+@use "scss/colors";
+
+.button {
+  padding: variables.$spacing-xl;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  gap: variables.$spacing-sm;
+  border: variables.$border-thin dashed colors.$grey-400;
+  box-shadow: none;
+  background-color: transparent;
+  border-radius: variables.$border-radius-md;
+  transition:
+    color variables.$transition,
+    border-color variables.$transition;
+
+  &:only-child {
+    grid-column: 2 / 3;
+  }
+
+  &__text {
+    transition: color variables.$transition;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  &:hover,
+  &:focus-visible {
+    cursor: pointer;
+    border-color: colors.$blue;
+    color: colors.$blue;
+
+    .button__text {
+      color: colors.$blue;
+    }
+  }
+
+  & .icon {
+    flex-shrink: 0;
+  }
+}

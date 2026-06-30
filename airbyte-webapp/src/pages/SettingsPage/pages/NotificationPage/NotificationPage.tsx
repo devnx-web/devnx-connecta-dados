@@ -1,0 +1,34 @@
+import React from "react";
+import { useIntl } from "react-intl";
+
+import { FlexContainer } from "components/ui/Flex";
+import { Heading } from "components/ui/Heading";
+import { Separator } from "components/ui/Separator";
+
+import { SetupBillingAlertsLink } from "area/organization/components/SetupBillingAlertsLink";
+import { NotificationSettingsForm } from "area/settings/components/NotificationSettingsForm";
+import { WorkspaceEmailForm } from "area/workspace/components/WorkspaceEmailForm";
+import { useTrackPage, PageTrackingCodes } from "core/services/analytics";
+import { FeatureItem, useFeature } from "core/services/features";
+
+export const NotificationPage: React.FC = () => {
+  const { formatMessage } = useIntl();
+  useTrackPage(PageTrackingCodes.SETTINGS_NOTIFICATION);
+  const emailNotificationsFeatureEnabled = useFeature(FeatureItem.EmailNotifications);
+
+  return (
+    <FlexContainer direction="column" gap="xl">
+      <FlexContainer justifyContent="space-between" alignItems="center">
+        <Heading as="h1">{formatMessage({ id: "settings.notificationSettings" })}</Heading>
+        <SetupBillingAlertsLink />
+      </FlexContainer>
+      {emailNotificationsFeatureEnabled && (
+        <>
+          <WorkspaceEmailForm />
+          <Separator />
+        </>
+      )}
+      <NotificationSettingsForm />
+    </FlexContainer>
+  );
+};

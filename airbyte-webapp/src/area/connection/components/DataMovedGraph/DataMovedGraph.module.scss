@@ -1,0 +1,11 @@
+@use "scss/colors";
+@use "scss/z-indices";
+
+:export {
+  tooltipZindex: z-indices.$tooltip;
+  graphColor: colors.$grey-100;
+  chartHoverFill: colors.$grey-50;
+  tooltipLabelColor: colors.$dark-blue;
+  tooltipItemColor: colors.$grey-700;
+  recordsColor: colors.$blue-200;
+}

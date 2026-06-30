@@ -1,0 +1,180 @@
+import React, { Suspense, useLayoutEffect, useMemo } from "react";
+import { FormattedMessage, useIntl } from "react-intl";
+import { useNavigate } from "react-router-dom";
+
+import { LoadingPage } from "components";
+import { Button } from "components/ui/Button";
+import { FlexContainer, FlexItem } from "components/ui/Flex";
+import { Heading } from "components/ui/Heading";
+import { HeadTitle } from "components/ui/HeadTitle";
+import { PageGridContainer } from "components/ui/PageGridContainer";
+import { PageHeader } from "components/ui/PageHeader";
+import { ScrollParent } from "components/ui/ScrollParent";
+
+import { CapacityReachedMessage } from "area/connection/components/CapacityReachedMessage";
+import { ActiveConnectionLimitReachedModal } from "area/workspace/components/ActiveConnectionLimitReachedModal";
+import { useCurrentWorkspaceLimits } from "area/workspace/utils/useCurrentWorkspaceLimits";
+import { useConnectionList, useCurrentWorkspace, useFilters } from "core/api";
+import { WebBackendConnectionListSortKey } from "core/api/types/AirbyteClient";
+import { PageTrackingCodes, useTrackPage } from "core/services/analytics";
+import { useModalService } from "core/services/Modal";
+import { useDrawerActions } from "core/services/ui/DrawerService";
+import { Intent, useGeneratedIntent } from "core/utils/rbac";
+import { RoutePaths, ConnectionRoutePaths } from "pages/routePaths";
+
+import styles from "./AllConnectionsPage.module.scss";
+import { FilterValues } from "./ConnectionsFilters/ConnectionsFilters";
+import { ConnectionsListCard } from "./ConnectionsListCard";
+import { ConnectionsSummary } from "./ConnectionsSummary";
+
+const ConnectionOnboarding = React.lazy(() =>
+  import("area/connection/components/ConnectionOnboarding").then((module) => ({ default: module.ConnectionOnboarding }))
+);
+
+export const AllConnectionsPage: React.FC = () => {
+  useTrackPage(PageTrackingCodes.CONNECTIONS_LIST);
+  const navigate = useNavigate();
+  const { activeConnectionLimitReached, limits } = useCurrentWorkspaceLimits();
+  const { formatMessage } = useIntl();
+  const { openModal } = useModalService();
+  const { closeDrawer } = useDrawerActions();
+
+  // Filter state management
+  const [filterValues, setFilterValue, resetFilters] = useFilters<FilterValues>({
+    search: "",
+    state: null,
+    status: null,
+    source: null,
+    destination: null,
+  });
+
+  // Tag filter state management
+  const [tagFilters, setTagFilters] = React.useState<string[]>([]);
+
+  // Burst (on-demand) filter state management
+  const [burstFilter, setBurstFilter] = React.useState(false);
+
+  // Sort state management
+  const [sortKey, setSortKey] = React.useState<WebBackendConnectionListSortKey>("connectionName_asc");
+
+  const { workspaceId } = useCurrentWorkspace();
+  const canCreateConnection = useGeneratedIntent(Intent.CreateOrEditConnection);
+
+  // Pass filters and sort state to useConnectionList for server-side filtering and sorting
+  const connectionListQuery = useConnectionList({
+    filters: {
+      search: filterValues.search,
+      status: filterValues.status,
+      state: filterValues.state,
+      sourceDefinitionIds: filterValues.source ? [filterValues.source] : [],
+      destinationDefinitionIds: filterValues.destination ? [filterValues.destination] : [],
+      tagIds: tagFilters.length > 0 ? tagFilters : [],
+      onDemandEnabled: burstFilter ? true : null,
+    },
+    sortKey,
+  });
+
+  const connections = useMemo(
+    () => connectionListQuery.data?.pages.flatMap((page) => page.connections) ?? [],
+    [connectionListQuery.data?.pages]
+  );
+
+  const onCreateConnection = () => {
+    navigate(
+      `/${RoutePaths.Workspaces}/${workspaceId}/${RoutePaths.Connections}/${ConnectionRoutePaths.ConnectionNew}`
+    );
+  };
+
+  const onCreateClick = (sourceDefinitionId?: string) => {
+    if (activeConnectionLimitReached && limits) {
+      openModal({
+        title: formatMessage({ id: "workspaces.activeConnectionLimitReached.title" }),
+        content: () => <ActiveConnectionLimitReachedModal connectionCount={limits.activeConnections.current} />,
+      });
+    } else {
+      navigate(`${ConnectionRoutePaths.ConnectionNew}`, { state: { sourceDefinitionId } });
+    }
+  };
+
+  useLayoutEffect(() => {
+    return () => closeDrawer();
+  }, [closeDrawer]);
+
+  // This query is only used to determine if the workspace's total connection count is > 0
+  const connectionCountQuery = useConnectionList({
+    pageSize: 1,
+  });
+  const hasAnyConnections =
+    connectionCountQuery.data?.pages.length && connectionCountQuery.data.pages[0].connections.length > 0;
+
+  if (connectionCountQuery.isLoading) {
+    return <LoadingPage />;
+  }
+
+  return (
+    <Suspense fallback={<LoadingPage />}>
+      <>
+        <HeadTitle titles={[{ id: "sidebar.connections" }]} />
+        {hasAnyConnections ? (
+          <PageGridContainer>
+            <FlexContainer direction="column">
+              <PageHeader
+                className={styles.pageHeader}
+                leftComponent={
+                  <FlexContainer direction="column">
+                    <FlexItem>
+                      <Heading as="h1" size="lg">
+                        <FormattedMessage id="sidebar.connections" />
+                      </Heading>
+                    </FlexItem>
+                    <FlexItem>
+                      <ConnectionsSummary />
+                    </FlexItem>
+                  </FlexContainer>
+                }
+                endComponent={
+                  <FlexItem className={styles.alignSelfStart}>
+                    <Button
+                      disabled={!canCreateConnection}
+                      icon="plus"
+                      variant="primary"
+                      size="sm"
+                      onClick={() => onCreateClick()}
+                      data-testid="new-connection-button"
+                    >
+                      <FormattedMessage id="connection.newConnection" />
+                    </Button>
+                  </FlexItem>
+                }
+              />
+              <CapacityReachedMessage />
+            </FlexContainer>
+            <ScrollParent props={{ className: styles.pageBody }}>
+              <ConnectionsListCard
+                isLoading={connectionListQuery.isLoading}
+                connections={connections}
+                fetchNextPage={() => !connectionListQuery.isFetchingNextPage && connectionListQuery.fetchNextPage()}
+                hasNextPage={connectionListQuery.hasNextPage ?? false}
+                filterValues={filterValues}
+                setFilterValue={setFilterValue}
+                resetFilters={() => {
+                  resetFilters();
+                  setTagFilters([]);
+                  setBurstFilter(false);
+                }}
+                tagFilters={tagFilters}
+                setTagFilters={setTagFilters}
+                burstFilter={burstFilter}
+                setBurstFilter={setBurstFilter}
+                sortKey={sortKey}
+                setSortKey={setSortKey}
+              />
+            </ScrollParent>
+          </PageGridContainer>
+        ) : (
+          <ConnectionOnboarding onCreate={onCreateConnection} />
+        )}
+      </>
+    </Suspense>
+  );
+};
