@@ -14,6 +14,7 @@ Crie o app como Docker Compose:
 - Compose file: `docker-compose.easypanel.yml`
 - Dominio do frontend: `condados.devnx.com.br`
 - Porta do frontend: `8080`
+- Se aparecer 502, edite o dominio e vincule ao container/servico `frontend` na porta `8080`
 
 Variaveis recomendadas:
 

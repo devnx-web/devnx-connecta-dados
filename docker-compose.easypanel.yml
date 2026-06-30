@@ -3,7 +3,7 @@ services:
     image: docker:27-cli
     restart: unless-stopped
     command: >
-      sh -lc "apk add --no-cache bash ca-certificates curl &&
+      sh -lc "apk add --no-cache bash ca-certificates coreutils curl &&
       bash /usr/local/bin/install-airbyte.sh"
     environment:
       AIRBYTE_PORT: ${AIRBYTE_PORT:-8002}
@@ -32,6 +32,11 @@ services:
       NGINX_RESOLVER: ${NGINX_RESOLVER:-127.0.0.11}
     expose:
       - "8080"
+    networks:
+      default:
+        aliases:
+          - devnx-connecta-dados
+          - projetos_devnx-connecta-dados
 
 volumes:
   airbyte_abctl_home:
