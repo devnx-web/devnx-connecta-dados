@@ -29,8 +29,10 @@ services:
     depends_on:
       - airbyte
     environment:
-      AILIV_API_URL: ${AILIV_API_URL:-http://172.17.0.1:8002}
+      AILIV_API_URL: ${AILIV_API_URL:-http://host.docker.internal:8002}
       NGINX_RESOLVER: ${NGINX_RESOLVER:-127.0.0.11}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     expose:
       - "8080"
     networks:
