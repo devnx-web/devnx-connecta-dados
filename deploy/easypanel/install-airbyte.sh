@@ -8,6 +8,9 @@ AIRBYTE_HOST="${AIRBYTE_HOST:-}"
 AIRBYTE_LOW_RESOURCE_MODE="${AIRBYTE_LOW_RESOURCE_MODE:-false}"
 AIRBYTE_INSECURE_COOKIES="${AIRBYTE_INSECURE_COOKIES:-false}"
 AIRBYTE_CHART_VERSION="${AIRBYTE_CHART_VERSION:-}"
+INSTALLER_VERSION="2026-06-30.2"
+
+echo "DevNX Airbyte installer ${INSTALLER_VERSION}"
 
 wait_for_docker() {
   for _ in $(seq 1 60); do
@@ -54,18 +57,23 @@ wait_for_docker
 install_abctl
 build_install_flags
 
+install_needed=false
+
 abctl local status >/tmp/abctl-status.log 2>&1 || true
 tr -cd '\11\12\15\40-\176' < /tmp/abctl-status.log > /tmp/abctl-status-clean.log || true
 cat /tmp/abctl-status.log || true
 
 if grep -Eaqi "does not appear|not.*installed|not installed" /tmp/abctl-status-clean.log; then
-  echo "Airbyte is not installed yet."
-  echo "Installing Airbyte with abctl on host port ${AIRBYTE_PORT}..."
-  abctl local install "${ABCTL_FLAGS[@]}"
+  install_needed=true
 elif docker ps -a --format '{{.Names}}' | grep -qx "airbyte-abctl-control-plane"; then
   echo "Existing Airbyte installation found."
 else
   echo "No Airbyte control plane container was found."
+  install_needed=true
+fi
+
+if [[ "$install_needed" == "true" ]]; then
+  echo "Airbyte is not installed yet."
   echo "Installing Airbyte with abctl on host port ${AIRBYTE_PORT}..."
   abctl local install "${ABCTL_FLAGS[@]}"
 fi
