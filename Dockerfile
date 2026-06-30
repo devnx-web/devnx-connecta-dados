@@ -35,7 +35,7 @@ RUN bash -lc '. ./scripts/calculate-source-hash.sh && pnpm exec vite build'
 
 FROM airbyte/airbyte-base-nginx-image:3.3 AS runtime
 
-ENV AILIV_API_URL=http://127.0.0.1:8002
+ENV AILIV_API_URL=http://172.17.0.1:8002
 ENV NGINX_RESOLVER=127.0.0.11
 
 EXPOSE 8080

@@ -1,0 +1,38 @@
+services:
+  airbyte:
+    image: docker:27-cli
+    restart: unless-stopped
+    command: >
+      sh -lc "apk add --no-cache bash ca-certificates curl &&
+      bash /usr/local/bin/install-airbyte.sh"
+    environment:
+      AIRBYTE_PORT: ${AIRBYTE_PORT:-8002}
+      AIRBYTE_EMAIL: ${AIRBYTE_EMAIL:-admin@devnx.com.br}
+      AIRBYTE_PASSWORD: ${AIRBYTE_PASSWORD:-change-me-now}
+      AIRBYTE_HOST: ${AIRBYTE_HOST:-}
+      AIRBYTE_LOW_RESOURCE_MODE: ${AIRBYTE_LOW_RESOURCE_MODE:-false}
+      AIRBYTE_INSECURE_COOKIES: ${AIRBYTE_INSECURE_COOKIES:-false}
+      AIRBYTE_CHART_VERSION: ${AIRBYTE_CHART_VERSION:-}
+      TELEMETRY_ENABLED: "0"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - airbyte_abctl_home:/root/.airbyte
+      - airbyte_kube:/root/.kube
+      - ./deploy/easypanel/install-airbyte.sh:/usr/local/bin/install-airbyte.sh:ro
+
+  frontend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    depends_on:
+      - airbyte
+    environment:
+      AILIV_API_URL: ${AILIV_API_URL:-http://172.17.0.1:8002}
+      NGINX_RESOLVER: ${NGINX_RESOLVER:-127.0.0.11}
+    ports:
+      - "${FRONTEND_PORT:-8080}:8080"
+
+volumes:
+  airbyte_abctl_home:
+  airbyte_kube:
