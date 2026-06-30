@@ -15,7 +15,6 @@ Crie o app como Docker Compose:
 - Dominio do frontend: `condados.devnx.com.br`
 - Porta do frontend: `8080`
 - Se aparecer 502, edite o dominio e vincule ao container/servico `frontend` na porta `8080`
-- O container do frontend tambem fica nomeado como `projetos_devnx-connecta-dados`
 
 Variaveis recomendadas:
 
