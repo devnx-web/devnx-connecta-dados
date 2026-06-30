@@ -54,10 +54,11 @@ wait_for_docker
 install_abctl
 build_install_flags
 
-if abctl local status >/tmp/abctl-status.log 2>&1; then
+if abctl local status >/tmp/abctl-status.log 2>&1 && ! grep -qi "does not appear to be installed" /tmp/abctl-status.log; then
   echo "Existing Airbyte installation found."
   cat /tmp/abctl-status.log
 else
+  cat /tmp/abctl-status.log || true
   echo "Installing Airbyte with abctl on host port ${AIRBYTE_PORT}..."
   abctl local install "${ABCTL_FLAGS[@]}"
 fi
