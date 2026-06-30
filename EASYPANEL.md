@@ -18,7 +18,6 @@ Crie o app como Docker Compose:
 Variaveis recomendadas:
 
 ```env
-FRONTEND_PORT=8080
 AILIV_API_URL=http://172.17.0.1:8002
 NGINX_RESOLVER=127.0.0.11
 AIRBYTE_PORT=8002
