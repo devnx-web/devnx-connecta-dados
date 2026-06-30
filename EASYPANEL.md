@@ -30,6 +30,8 @@ AIRBYTE_LOW_RESOURCE_MODE=false
 Troque `AIRBYTE_EMAIL` e `AIRBYTE_PASSWORD` antes de abrir em producao.
 
 O servico `airbyte` usa `abctl` e monta `/var/run/docker.sock` para criar o cluster Airbyte no Docker host. Na primeira subida, a instalacao pode demorar bastante porque o Airbyte baixa imagens e sobe Kubernetes local.
+Esse servico precisa usar `network_mode: host`; o `abctl` cria um cluster `kind` cuja API fica exposta em `127.0.0.1` no host.
+O frontend precisa estar conectado a rede externa `easypanel`, pois o Traefik do EasyPanel resolve o container por essa rede.
 
 ## Local
 

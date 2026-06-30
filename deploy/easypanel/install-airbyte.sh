@@ -8,7 +8,7 @@ AIRBYTE_HOST="${AIRBYTE_HOST:-}"
 AIRBYTE_LOW_RESOURCE_MODE="${AIRBYTE_LOW_RESOURCE_MODE:-false}"
 AIRBYTE_INSECURE_COOKIES="${AIRBYTE_INSECURE_COOKIES:-false}"
 AIRBYTE_CHART_VERSION="${AIRBYTE_CHART_VERSION:-}"
-INSTALLER_VERSION="2026-06-30.2"
+INSTALLER_VERSION="2026-06-30.3"
 
 echo "DevNX Airbyte installer ${INSTALLER_VERSION}"
 
@@ -53,6 +53,32 @@ build_install_flags() {
   fi
 }
 
+fix_airbyte_volume_permissions() {
+  for _ in $(seq 1 240); do
+    if docker ps --format '{{.Names}}' | grep -qx "airbyte-abctl-control-plane"; then
+      if docker exec airbyte-abctl-control-plane sh -lc '
+        if [ -d /var/local-path-provisioner/airbyte-volume-db ]; then
+          chown -R 70:70 /var/local-path-provisioner/airbyte-volume-db
+          chmod 700 /var/local-path-provisioner/airbyte-volume-db
+          mkdir -p /var/local-path-provisioner/airbyte-local-pv
+          chmod 0777 /var/local-path-provisioner/airbyte-local-pv
+          exit 0
+        fi
+
+        exit 1
+      ' >/dev/null 2>&1; then
+        echo "Airbyte local PV permissions fixed."
+        return 0
+      fi
+    fi
+
+    sleep 2
+  done
+
+  echo "Timed out waiting to fix Airbyte local PV permissions." >&2
+  return 1
+}
+
 wait_for_docker
 install_abctl
 build_install_flags
@@ -75,7 +101,10 @@ fi
 if [[ "$install_needed" == "true" ]]; then
   echo "Airbyte is not installed yet."
   echo "Installing Airbyte with abctl on host port ${AIRBYTE_PORT}..."
+  fix_airbyte_volume_permissions &
+  volume_fix_pid="$!"
   abctl local install "${ABCTL_FLAGS[@]}"
+  wait "$volume_fix_pid" || true
 fi
 
 if [[ -n "$AIRBYTE_EMAIL" && -n "$AIRBYTE_PASSWORD" ]]; then

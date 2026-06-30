@@ -2,6 +2,7 @@ services:
   airbyte:
     image: docker:27-cli
     restart: unless-stopped
+    network_mode: host
     command: >
       sh -lc "apk add --no-cache bash ca-certificates coreutils curl &&
       bash /usr/local/bin/install-airbyte.sh"
@@ -37,7 +38,16 @@ services:
         aliases:
           - devnx-connecta-dados
           - projetos_devnx-connecta-dados
+      easypanel:
+        aliases:
+          - devnx-connecta-dados
+          - projetos_devnx-connecta-dados
+          - projetos_devnx-connecta-dados_undefined
 
 volumes:
   airbyte_abctl_home:
   airbyte_kube:
+
+networks:
+  easypanel:
+    external: true
