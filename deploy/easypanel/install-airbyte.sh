@@ -54,11 +54,18 @@ wait_for_docker
 install_abctl
 build_install_flags
 
-if abctl local status >/tmp/abctl-status.log 2>&1 && ! grep -qi "does not appear to be installed" /tmp/abctl-status.log; then
+abctl local status >/tmp/abctl-status.log 2>&1 || true
+tr -cd '\11\12\15\40-\176' < /tmp/abctl-status.log > /tmp/abctl-status-clean.log || true
+cat /tmp/abctl-status.log || true
+
+if grep -Eaqi "does not appear|not.*installed|not installed" /tmp/abctl-status-clean.log; then
+  echo "Airbyte is not installed yet."
+  echo "Installing Airbyte with abctl on host port ${AIRBYTE_PORT}..."
+  abctl local install "${ABCTL_FLAGS[@]}"
+elif docker ps -a --format '{{.Names}}' | grep -qx "airbyte-abctl-control-plane"; then
   echo "Existing Airbyte installation found."
-  cat /tmp/abctl-status.log
 else
-  cat /tmp/abctl-status.log || true
+  echo "No Airbyte control plane container was found."
   echo "Installing Airbyte with abctl on host port ${AIRBYTE_PORT}..."
   abctl local install "${ABCTL_FLAGS[@]}"
 fi

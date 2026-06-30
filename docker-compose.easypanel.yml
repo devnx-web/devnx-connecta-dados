@@ -21,6 +21,7 @@ services:
       - ./deploy/easypanel/install-airbyte.sh:/usr/local/bin/install-airbyte.sh:ro
 
   frontend:
+    container_name: projetos_devnx-connecta-dados
     build:
       context: .
       dockerfile: Dockerfile
